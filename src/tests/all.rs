@@ -1,11 +1,9 @@
 #![warn(clippy::all, rust_2018_idioms)]
 
 #[macro_use]
-extern crate claim;
+extern crate claims;
 #[macro_use]
 extern crate diesel;
-#[macro_use]
-extern crate lazy_static;
 #[macro_use]
 extern crate serde;
 #[macro_use]
@@ -30,6 +28,7 @@ use std::{
 use diesel::prelude::*;
 
 mod account_lock;
+mod admin_actions;
 mod authentication;
 mod badge;
 mod blocked_routes;

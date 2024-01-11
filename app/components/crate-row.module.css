@@ -3,15 +3,13 @@
 
     display: flex;
     flex-wrap: wrap;
-    padding: 15px 25px;
+    padding: var(--space-s-m) var(--space-m-l);
     background-color: white;
-    border-radius: 5px;
+    border-radius: var(--space-3xs);
     box-shadow: var(--shadow);
-    transition: all 300ms;
 }
 
 .description-box {
-    padding-top: 5px;
     display: flex;
     flex-direction: column;
     width: 70%;
@@ -26,25 +24,25 @@
 }
 
 .version {
-    margin-left: 10px;
+    margin-left: var(--space-2xs);
 }
 
 .copy-button {
     composes: button-reset from '../styles/shared/buttons.module.css';
-    padding: 1px 6px;
+    padding: 0 var(--space-2xs);
     color: var(--main-color);
     cursor: pointer;
     opacity: 0;
-    transition: 250ms;
+    transition: var(--transition-medium);
 
     .crate-row:hover & {
         opacity: .8;
-        transition: 0s;
+        transition: var(--transition-instant);
     }
 
     .crate-row:hover &:hover, &:focus {
         opacity: 1;
-        transition: 0s;
+        transition: var(--transition-instant);
     }
 
     svg {
@@ -55,18 +53,35 @@
 
 .description {
     composes: small from '../styles/shared/typography.module.css';
-    margin-top: 8px;
+    margin-top: var(--space-xs);
+    line-height: 1.5;
 }
 
 .stats {
     width: 30%;
     color: var(--main-color-light);
+
+    > * + * {
+        margin-top: var(--space-xs);
+    }
+
+    svg {
+        height: 1em;
+        width: 1em;
+        margin-right: var(--space-xs);
+
+        &.download-icon {
+            height: calc(1em + 20px);
+            width: calc(1em + 20px);
+            margin: -10px;
+            margin-right: calc(var(--space-xs) - 10px);
+        }
+    }
 }
 
 .downloads {
     display: flex;
     align-items: center;
-    padding-bottom: 5px;
 }
 
 .recent-downloads {
@@ -75,13 +90,8 @@
 }
 
 .updated-at {
-    padding-top: 5px;
     display: flex;
     align-items: center;
-
-    svg {
-        padding: 10px;
-    }
 }
 
 ul.quick-links {
@@ -91,15 +101,10 @@ ul.quick-links {
 
     font-size: 80%;
     list-style-type: none;
-    margin: 1em 0 0 0;
+    margin: var(--space-xs) 0 0 0;
     padding: 0;
 
-
-    li {
-        margin-right: 1em;
-
-        &:last-child {
-            margin-right: 0;
-        }
+    > * + * {
+        margin-left: var(--space-xs);
     }
 }

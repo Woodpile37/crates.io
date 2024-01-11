@@ -3,7 +3,7 @@ use cargo_registry::{
     schema::{dependencies, versions},
     util::errors::AppResult,
 };
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use chrono::NaiveDateTime;
 use diesel::prelude::*;
@@ -12,12 +12,14 @@ use diesel::prelude::*;
 pub struct VersionBuilder<'a> {
     created_at: Option<NaiveDateTime>,
     dependencies: Vec<(i32, Option<&'static str>)>,
-    features: HashMap<String, Vec<String>>,
+    features: BTreeMap<String, Vec<String>>,
     license: Option<&'a str>,
     license_file: Option<&'a str>,
     num: semver::Version,
     size: i32,
     yanked: bool,
+    checksum: String,
+    links: Option<String>,
 }
 
 impl<'a> VersionBuilder<'a> {
@@ -35,12 +37,14 @@ impl<'a> VersionBuilder<'a> {
         VersionBuilder {
             created_at: None,
             dependencies: Vec::new(),
-            features: HashMap::new(),
+            features: BTreeMap::new(),
             license: None,
             license_file: None,
             num,
             size: 0,
             yanked: false,
+            checksum: String::new(),
+            links: None,
         }
     }
 
@@ -53,6 +57,12 @@ impl<'a> VersionBuilder<'a> {
     /// Sets the version's `license` value.
     pub fn license(mut self, license: Option<&'a str>) -> Self {
         self.license = license;
+        self
+    }
+
+    /// Sets the version's `checksum` value.
+    pub fn checksum(mut self, checksum: &str) -> Self {
+        self.checksum = checksum.to_string();
         self
     }
 
@@ -91,6 +101,8 @@ impl<'a> VersionBuilder<'a> {
             self.license_file,
             self.size,
             published_by,
+            self.checksum,
+            self.links,
         )?
         .save(connection, "someone@example.com")?;
 

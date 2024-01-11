@@ -27,7 +27,7 @@ impl Keyword {
     pub fn find_by_keyword(conn: &PgConnection, name: &str) -> QueryResult<Keyword> {
         keywords::table
             .filter(keywords::keyword.eq(lower(name)))
-            .first(&*conn)
+            .first(conn)
     }
 
     pub fn find_or_create_all(conn: &PgConnection, names: &[&str]) -> QueryResult<Vec<Keyword>> {
@@ -50,15 +50,13 @@ impl Keyword {
     }
 
     pub fn valid_name(name: &str) -> bool {
-        if name.is_empty() {
-            return false;
-        }
-        // unwrap is okay because name is non-empty
-        name.chars().next().unwrap().is_alphanumeric()
-            && name
-                .chars()
-                .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
-            && name.chars().all(|c| c.is_ascii())
+        let mut chars = name.chars();
+        let first = match chars.next() {
+            None => return false,
+            Some(c) => c,
+        };
+        first.is_ascii_alphanumeric()
+            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '+')
     }
 
     pub fn update_crate(conn: &PgConnection, krate: &Crate, keywords: &[&str]) -> QueryResult<()> {

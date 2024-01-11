@@ -4,7 +4,7 @@ use std::borrow::Cow;
 
 use crate::app::App;
 use crate::email::Emails;
-use crate::util::errors::AppResult;
+use crate::util::errors::{forbidden, AppResult};
 
 use crate::models::{ApiToken, Crate, CrateOwner, Email, NewEmail, Owner, OwnerKind, Rights};
 use crate::schema::{crate_owners, emails, users};
@@ -121,6 +121,16 @@ impl User {
         Ok(Self::find(conn, api_token.user_id)?)
     }
 
+    /// Queries the database for a user with the specified verified email address.
+    pub fn find_by_verified_email(conn: &PgConnection, email: &str) -> AppResult<User> {
+        let email: Email = emails::table
+            .filter(emails::email.eq(email))
+            .filter(emails::verified.eq(true))
+            .first(conn)?;
+
+        Ok(Self::find(conn, email.user_id)?)
+    }
+
     pub fn owning(krate: &Crate, conn: &PgConnection) -> QueryResult<Vec<Owner>> {
         let users = CrateOwner::by_owner_kind(OwnerKind::User)
             .inner_join(users::table)
@@ -166,7 +176,7 @@ impl User {
         Email::belonging_to(self)
             .select(emails::email)
             .filter(emails::verified.eq(true))
-            .first(&*conn)
+            .first(conn)
             .optional()
     }
 
@@ -174,7 +184,55 @@ impl User {
     pub fn email(&self, conn: &PgConnection) -> AppResult<Option<String>> {
         Ok(Email::belonging_to(self)
             .select(emails::email)
-            .first(&*conn)
+            .first(conn)
             .optional()?)
+    }
+
+    /// Attempt to turn this user into an AdminUser
+    pub fn admin(&self) -> AppResult<AdminUser> {
+        AdminUser::new(self)
+    }
+}
+
+pub struct AdminUser(User);
+
+impl AdminUser {
+    pub fn new(user: &User) -> AppResult<Self> {
+        match user.gh_login.as_str() {
+            "carols10cents" | "jtgeibel" | "Turbo87" => Ok(Self(user.clone())),
+            _ => Err(forbidden()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hardcoded_admins() {
+        let user = User {
+            id: 3,
+            gh_access_token: "arbitrary".into(),
+            gh_login: "literally_anything".into(),
+            name: None,
+            gh_avatar: None,
+            gh_id: 7,
+            account_lock_reason: None,
+            account_lock_until: None,
+        };
+        assert!(user.admin().is_err());
+
+        let sneaky_user = User {
+            gh_login: "carols10cents_plus_extra_stuff".into(),
+            ..user
+        };
+        assert!(sneaky_user.admin().is_err());
+
+        let real_real_real = User {
+            gh_login: "carols10cents".into(),
+            ..sneaky_user
+        };
+        assert!(real_real_real.admin().is_ok());
     }
 }

@@ -14,7 +14,7 @@ use crate::util::rfc3339;
 /// and are possibly of malicious intent e.g. ad tracking networks, etc.
 const DOCUMENTATION_BLOCKLIST: &[&str] = &["rust-ci.org", "rustless.org", "ironframework.io"];
 
-#[derive(PartialEq, Debug, Serialize, Deserialize)]
+#[derive(PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct EncodableBadge {
     pub badge_type: String,
     pub attributes: HashMap<String, Option<String>>,
@@ -263,7 +263,7 @@ impl EncodableCrate {
         };
         let keyword_ids = keywords.map(|kws| kws.iter().map(|kw| kw.keyword.clone()).collect());
         let category_ids = categories.map(|cats| cats.iter().map(|cat| cat.slug.clone()).collect());
-        let badges = badges.map(|bs| bs.into_iter().map(Badge::into).collect());
+        let badges = badges.map(|_| vec![]);
         let documentation = Self::remove_blocked_documentation_urls(documentation);
 
         let max_version = top_versions
@@ -503,6 +503,7 @@ pub struct EncodablePrivateUser {
     pub email: Option<String>,
     pub avatar: Option<String>,
     pub url: Option<String>,
+    pub admin: bool,
 }
 
 impl EncodablePrivateUser {
@@ -513,6 +514,7 @@ impl EncodablePrivateUser {
         email_verified: bool,
         email_verification_sent: bool,
     ) -> Self {
+        let admin = user.admin().is_ok();
         let User {
             id,
             name,
@@ -531,6 +533,7 @@ impl EncodablePrivateUser {
             login: gh_login,
             name,
             url: Some(url),
+            admin,
         }
     }
 }
@@ -597,6 +600,7 @@ pub struct EncodableVersion {
     pub crate_size: Option<i32>,
     pub published_by: Option<EncodablePublicUser>,
     pub audit_actions: Vec<EncodableAuditAction>,
+    pub checksum: String,
 }
 
 impl EncodableVersion {
@@ -616,6 +620,7 @@ impl EncodableVersion {
             yanked,
             license,
             crate_size,
+            checksum,
             ..
         } = version;
 
@@ -639,6 +644,7 @@ impl EncodableVersion {
             license,
             links,
             crate_size,
+            checksum,
             published_by: published_by.map(User::into),
             audit_actions: audit_actions
                 .into_iter()
@@ -749,6 +755,7 @@ mod tests {
                 authors: "".to_string(),
             },
             crate_size: Some(1234),
+            checksum: String::new(),
             published_by: None,
             audit_actions: vec![EncodableAuditAction {
                 action: "publish".to_string(),

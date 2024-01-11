@@ -65,16 +65,12 @@ These files have to do with the frontend:
 
 ## Deployment - Heroku
 
-Crates.io is deployed on [Heroku](https://heroku.com/). See [`docs/MIRROR.md`][] for info about
-setting up your own instance on Heroku!
-
-[`docs/MIRROR.md`]: https://github.com/rust-lang/crates.io/blob/master/docs/MIRROR.md
+Crates.io is deployed on [Heroku](https://heroku.com/).
 
 These files are Heroku-specific; if you're deploying the crates.io codebase on another platform,
 there's useful information in these files that you might need to translate to a different format
 for another platform.
 
-* `app.json` - Configuration for Heroku Deploy Button
 * `.buildpacks` - A list of buildpacks used during deployment
 * `config/nginx.conf.erb` - Template used by the nginx buildpack
 * `.diesel_version` - Used by diesel buildpack to install a specific version of Diesel CLI during

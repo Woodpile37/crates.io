@@ -13,11 +13,21 @@ use std::{
 
 use futures_channel::oneshot;
 use futures_util::future;
-use hyper::{body::to_bytes, Body, Error, Request, Response, Server, StatusCode, Uri};
-use tokio::{
-    net::{TcpListener, TcpStream},
-    runtime,
+use hyper::{
+    body::to_bytes, server::conn::AddrStream, Body, Error, Request, Response, Server, StatusCode,
+    Uri,
 };
+use tokio::runtime;
+
+/// Headers that are ignored when capturing and replaying request logs
+static IGNORED_HEADERS: &[&str] = &[
+    "authorization",
+    "date",
+    "cache-control",
+    "host",
+    // This is explicitly checked in replay mode, but we want to ignore it on capture
+    "user-agent",
+];
 
 // A "bomb" so when the test task exists we know when to shut down
 // the server and fail if the subtask failed.
@@ -55,10 +65,10 @@ impl Drop for Bomb {
                 }
             }
             Ok(_) if thread::panicking() => {}
-            Ok(None) => {}
-            Ok(Some((data, file))) => {
+            Ok(Some((data, file))) if data != b"[]\n" => {
                 assert_ok!(assert_ok!(File::create(&file)).write_all(&data));
             }
+            Ok(_) => {}
         }
     }
 }
@@ -78,18 +88,20 @@ enum Record {
 
 pub fn proxy() -> (String, Bomb) {
     let me = thread::current().name().unwrap().to_string();
-    let record = dotenv::var("RECORD").is_ok();
+    let record_env = dotenv::var("RECORD").ok();
 
     let (url_tx, url_rx) = mpsc::channel();
 
-    let data = cache_file(&me.replace("::", "_"));
-    let record = if record && !data.exists() {
-        Record::Capture(Vec::new(), data)
-    } else if !data.exists() {
+    let path = cache_file(&me.replace("::", "_"));
+    let should_capture =
+        record_env.is_some() && (!path.exists() || record_env.as_deref() == Some("force"));
+    let record = if should_capture {
+        Record::Capture(Vec::new(), path)
+    } else if !path.exists() {
         Record::Replay(serde_json::from_slice(b"[]").unwrap())
     } else {
         let mut body = Vec::new();
-        assert_ok!(assert_ok!(File::open(&data)).read_to_end(&mut body));
+        assert_ok!(assert_ok!(File::open(&path)).read_to_end(&mut body));
         Record::Replay(serde_json::from_slice(&body).unwrap())
     };
 
@@ -100,41 +112,46 @@ pub fn proxy() -> (String, Bomb) {
 
     let thread = thread::spawn(move || {
         let rt = assert_ok!(runtime::Builder::new_current_thread().enable_io().build());
-
-        let client = if let Record::Capture(_, _) = record {
-            Some(hyper::Client::builder().build(hyper_tls::HttpsConnector::new()))
-        } else {
-            None
-        };
-
-        let listener = assert_ok!(rt.block_on(TcpListener::bind("127.0.0.1:0")));
-        url_tx
-            .send(format!("http://{}", assert_ok!(listener.local_addr())))
-            .unwrap();
-
+        let needs_client = matches!(record, Record::Capture(_, _));
         let record = Arc::new(Mutex::new(record));
-        let srv = Server::builder(hyper::server::accept::poll_fn(move |cx| {
-            listener
-                .poll_accept(cx)
-                .map(|res| Some(res.map(|(stream, _)| stream)))
-        }))
-        .serve(Proxy {
-            sink: sink2,
-            record: Arc::clone(&record),
-            client,
-        })
-        .with_graceful_shutdown(async {
-            quitrx.await.ok();
-        });
+        rt.block_on(async {
+            let client = if needs_client {
+                Some(hyper::Client::builder().build(hyper_tls::HttpsConnector::new()))
+            } else {
+                None
+            };
 
-        rt.block_on(srv).ok();
+            let addr = ([127, 0, 0, 1], 0).into();
+            let server = Server::bind(&addr).serve(Proxy {
+                sink: sink2,
+                record: Arc::clone(&record),
+                client,
+            });
+
+            url_tx
+                .send(format!("http://{}", server.local_addr()))
+                .unwrap();
+
+            server
+                .with_graceful_shutdown(async {
+                    quitrx.await.ok();
+                })
+                .await
+                .unwrap();
+        });
 
         let record = record.lock().unwrap();
         match *record {
             Record::Capture(ref data, ref path) => {
-                let data = assert_ok!(serde_json::to_string_pretty(data));
+                let mut data = assert_ok!(serde_json::to_string_pretty(data));
+                data.push('\n');
                 Some((data.into_bytes(), path.clone()))
             }
+            Record::Replay(ref remaining_exchanges) if !remaining_exchanges.is_empty() =>
+                panic!(
+                    "The HTTP proxy for this test received fewer requests than expected (remaining: {})",
+                    remaining_exchanges.len()
+                ),
             Record::Replay(..) => None,
         }
     });
@@ -185,7 +202,7 @@ impl tower_service::Service<Request<Body>> for Proxy {
     }
 }
 
-impl<'a> tower_service::Service<&'a TcpStream> for Proxy {
+impl<'a> tower_service::Service<&'a AddrStream> for Proxy {
     type Response = Proxy;
     type Error = Error;
     type Future = Pin<Box<dyn Future<Output = Result<Proxy, Error>> + Send + 'static>>;
@@ -194,7 +211,7 @@ impl<'a> tower_service::Service<&'a TcpStream> for Proxy {
         Poll::Ready(Ok(()))
     }
 
-    fn call(&mut self, _: &'a TcpStream) -> Self::Future {
+    fn call(&mut self, _: &'a AddrStream) -> Self::Future {
         Box::pin(future::ok(self.clone()))
     }
 }
@@ -209,6 +226,7 @@ struct Exchange {
 struct RecordedRequest {
     uri: String,
     method: String,
+    #[serde(serialize_with = "sorted_headers")]
     headers: HashSet<(String, String)>,
     body: String,
 }
@@ -216,13 +234,30 @@ struct RecordedRequest {
 #[derive(Serialize, Deserialize)]
 struct RecordedResponse {
     status: u16,
+    #[serde(serialize_with = "sorted_headers")]
     headers: HashSet<(String, String)>,
     body: String,
+}
+
+fn sorted_headers<S>(headers: &HashSet<(String, String)>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use serde::ser::SerializeSeq;
+
+    let mut headers = headers.clone().into_iter().collect::<Vec<_>>();
+    headers.sort_by_cached_key(|(name, _)| name.clone());
+    let mut seq = serializer.serialize_seq(Some(headers.len()))?;
+    for header in &headers {
+        seq.serialize_element(header)?;
+    }
+    seq.end()
 }
 
 type Client = hyper::Client<hyper_tls::HttpsConnector<hyper::client::HttpConnector>>;
 type ResponseAndExchange = (Response<Body>, Exchange);
 
+/// Capture the request and simulate a successful response
 async fn record_http(req: Request<Body>, client: Client) -> Result<ResponseAndExchange, Error> {
     // Deconstruct the incoming request and await for the full body
     let (header_parts, body) = req.into_parts();
@@ -237,26 +272,36 @@ async fn record_http(req: Request<Body>, client: Client) -> Result<ResponseAndEx
         method: method.to_string(),
         headers: headers
             .iter()
+            .filter(|h| !IGNORED_HEADERS.contains(&h.0.as_str()))
             .map(|h| (h.0.as_str().to_string(), h.1.to_str().unwrap().to_string()))
             .collect(),
         body: base64::encode(&body),
     };
 
-    // Construct an outgoing request
-    let uri = uri.to_string().replace("http://", "https://");
-    let uri = uri.parse::<Uri>().unwrap();
-    let mut req = Request::builder()
-        .method(method.clone())
-        .uri(uri)
-        .body(body.into())
-        .unwrap();
-    *req.headers_mut() = headers.clone();
+    let (status, headers, body) = if let Ok("passthrough") = dotenv::var("RECORD").as_deref() {
+        // Construct an outgoing request
+        let uri = uri.to_string().replace("http://", "https://");
+        let uri = uri.parse::<Uri>().unwrap();
+        let mut req = Request::builder()
+            .method(method.clone())
+            .uri(uri)
+            .body(body.into())
+            .unwrap();
+        *req.headers_mut() = headers.clone();
 
-    // Deconstruct the incoming response and await for the full body
-    let hyper_response = client.request(req).await?;
-    let status = hyper_response.status();
-    let headers = hyper_response.headers().clone();
-    let body = to_bytes(hyper_response.into_body()).await?;
+        // Deconstruct the incoming response and await for the full body
+        let hyper_response = client.request(req).await?;
+        let status = hyper_response.status();
+        let headers = hyper_response.headers().clone();
+        let body = to_bytes(hyper_response.into_body()).await?;
+        (status, headers, body)
+    } else {
+        (
+            StatusCode::OK,
+            http::HeaderMap::default(),
+            hyper::body::Bytes::new(),
+        )
+    };
 
     // Save the response for the exchange log
     let response = RecordedResponse {
@@ -283,8 +328,6 @@ fn replay_http(
     mut exchange: Exchange,
     stdout: &mut dyn Write,
 ) -> impl Future<Output = Result<Response<Body>, Error>> + Send {
-    static IGNORED_HEADERS: &[&str] = &["authorization", "date", "cache-control"];
-
     debug!("<- {req:?}");
     assert_eq!(req.uri().to_string(), exchange.request.uri);
     assert_eq!(req.method().to_string(), exchange.request.method);

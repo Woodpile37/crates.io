@@ -60,6 +60,15 @@ Another way to help out and to get to know the codebase is to review other peopl
 pull requests! Take a look at [`docs/PR-REVIEW.md`](https://github.com/rust-lang/crates.io/blob/master/docs/PR-REVIEW.md)
 for guidelines on how to do that.
 
+## Checking Release State
+
+If you are curious on the version that is published for crates.io, you can
+visit [whatsdeployed.io](https://whatsdeployed.io/s/FEM/rust-lang/crates.io).
+There you will find the commits involved in the current release.
+
+If you are only interested on the commit hash, you can also hit the site
+metadata endpoint available on `/api/v1/site_metadata`.
+
 ## Setting up a development environment
 
 First, you'll need git to clone the repo. [GitHub has help pages about setting
@@ -96,7 +105,7 @@ as well.
 In order to run the frontend on Windows and macOS, you will need to have installed:
 
 - [node](https://nodejs.org/en/) >= 16.15.0 (see `package.json` and `.github/workflows/ci.yml` for what we currently use)
-- [yarn](https://classic.yarnpkg.com/en/docs/install) v1.x
+- [pnpm](https://pnpm.io)
 
 Follow the links for each of these tools for their recommended installation
 instructions. If you already have these tools, or you have a different
@@ -113,7 +122,7 @@ into any trouble.
 To install the npm packages that crates.io uses, run:
 
 ```
-yarn install
+pnpm install
 ```
 
 You'll need to run these commands any time the libraries or versions of these
@@ -125,13 +134,13 @@ To build and serve the frontend assets, use the command `yarn start`. There
 are variations on this command that change which backend your frontend tries to
 talk to:
 
-| Command | Backend | Use case |
-|---------|---------|----------|
-| `yarn start:live` | https://crates.io | Testing UI changes with the full live site's data |
-| `yarn start:staging` | https://staging-crates-io.herokuapp.com | Testing UI changes with a smaller set of realistic data |
-| `yarn start` | Static fixture test data in `mirage/fixtures` | Setting up particular situations, see note |
-| `yarn start:local` | Backend server running locally | See the Working on the backend section for setup |
-| `yarn start -- --proxy https://crates.io` | Whatever is specified in `--proxy` arg | If your use case is not covered here |
+| Command                                   | Backend | Use case |
+|-------------------------------------------|---------|----------|
+| `pnpm start:live`                         | https://crates.io | Testing UI changes with the full live site's data |
+| `pnpm start:staging`                      | https://staging-crates-io.herokuapp.com | Testing UI changes with a smaller set of realistic data |
+| `pnpm start`                              | Static fixture test data in `mirage/fixtures` | Setting up particular situations, see note |
+| `pnpm start:local`                        | Backend server running locally | See the Working on the backend section for setup |
+| `pnpm start -- --proxy https://crates.io` | Whatever is specified in `--proxy` arg | If your use case is not covered here |
 
 > Note: If you want to set up a particular situation, you can edit the fixture
 > data used for tests in `mirage/fixtures`. The fixture data does not currently
@@ -143,7 +152,7 @@ talk to:
 You can run the frontend tests with:
 
 ```
-yarn test
+pnpm test
 ```
 
 ### Working on the Backend
@@ -155,7 +164,7 @@ In order to run the backend, you will need to have installed:
 - [Rust](https://www.rust-lang.org/en-US/) stable >= 1.16.0 and cargo, which comes with Rust
 - [Postgres](https://www.postgresql.org/) >= 9.5
 - [OpenSSL](https://www.openssl.org/) >= 1.0.2k
-- [diesel_cli](http://diesel.rs/guides/getting-started/) >= 1.2.0
+- [diesel_cli](http://diesel.rs/guides/getting-started/) >= 1.2.0 and < 2.0.0
 
 ##### Rust
 
@@ -276,7 +285,7 @@ by typing `\q`) without any errors to connect to your running Postgres server.
 On all platforms, install through `cargo` by running:
 
 ```
-cargo install diesel_cli --no-default-features --features postgres
+cargo install diesel_cli --no-default-features --features postgres --version 1
 ```
 
 This will install a binary named `diesel`, so you should be able to run `diesel
@@ -371,7 +380,7 @@ without a restart needed, and you can leave the frontend running while you
 restart the server):
 
 ```
-yarn start:local
+pnpm start:local
 ```
 
 And then you should be able to visit http://localhost:4200!

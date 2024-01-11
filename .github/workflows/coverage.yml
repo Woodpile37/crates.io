@@ -7,9 +7,9 @@ on:
       - master
 
 env:
-  CARGO_TARPAULIN_VERSION: 0.20.1
+  CARGO_TARPAULIN_VERSION: 0.22.0
   DIESEL_CLI_VERSION: 1.4.1
-  RUST_VERSION: 1.62.0
+  RUST_VERSION: 1.64.0
 
 jobs:
   coverage:
@@ -38,11 +38,11 @@ jobs:
           - 5432:5432
 
     steps:
-      - uses: actions/checkout@v3.0.2
+      - uses: actions/checkout@v3.1.0
 
       # Set up Rust
       - run: rustup default ${{ env.RUST_VERSION }}
-      - uses: Swatinem/rust-cache@v1.4.0
+      - uses: Swatinem/rust-cache@v2.0.1
 
       # Set up database
       - run: cargo install diesel_cli --vers ${{ env.DIESEL_CLI_VERSION }} --no-default-features --features postgres --debug

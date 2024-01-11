@@ -3,7 +3,7 @@
 use flate2::read::GzDecoder;
 use hex::ToHex;
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::Path;
 use std::sync::Arc;
@@ -11,8 +11,8 @@ use swirl::Job;
 
 use crate::controllers::cargo_prelude::*;
 use crate::models::{
-    insert_version_owner_action, Badge, Category, Crate, DependencyKind, Keyword, NewCrate,
-    NewVersion, Rights, VersionAction,
+    insert_version_owner_action, Category, Crate, DependencyKind, Keyword, NewCrate, NewVersion,
+    Rights, VersionAction,
 };
 use crate::worker;
 
@@ -128,6 +128,15 @@ pub fn publish(req: &mut dyn RequestExt) -> EndpointResult {
             )));
         }
 
+        if let Some(daily_version_limit) = app.config.new_version_rate_limit {
+            let published_today = count_versions_published_today(krate.id, &conn)?;
+            if published_today >= daily_version_limit as i64 {
+                return Err(cargo_err(
+                    "You have published too many versions of this crate in the last 24 hours",
+                ));
+            }
+        }
+
         // Length of the .crate tarball, which appears after the metadata in the request body.
         // TODO: Not sure why we're using the total content length (metadata + .crate file length)
         // to compare against the max upload size... investigate that and perhaps change to use
@@ -154,6 +163,11 @@ pub fn publish(req: &mut dyn RequestExt) -> EndpointResult {
         // This is only redundant for now. Eventually the duplication will be removed.
         let license = new_crate.license.clone();
 
+        // Read tarball from request
+        let mut tarball = Vec::new();
+        LimitErrorReader::new(req.body(), maximums.max_upload_size).read_to_end(&mut tarball)?;
+        let hex_cksum: String = Sha256::digest(&tarball).encode_hex();
+
         // Persist the new version of this crate
         let version = NewVersion::new(
             krate.id,
@@ -165,6 +179,8 @@ pub fn publish(req: &mut dyn RequestExt) -> EndpointResult {
             // to get here, and max upload sizes are way less than i32 max
             file_length as i32,
             user.id,
+            hex_cksum.clone(),
+            links.clone(),
         )?
         .save(&conn, &verified_email_address)?;
 
@@ -186,15 +202,8 @@ pub fn publish(req: &mut dyn RequestExt) -> EndpointResult {
         // in order to be able to warn about them
         let ignored_invalid_categories = Category::update_crate(&conn, &krate, &categories)?;
 
-        // Update all badges for this crate, collecting any invalid badges in
-        // order to be able to warn about them
-        let ignored_invalid_badges = Badge::update_crate(&conn, &krate, new_crate.badges.as_ref())?;
         let top_versions = krate.top_versions(&conn)?;
 
-        // Read tarball from request
-        let mut tarball = Vec::new();
-        LimitErrorReader::new(req.body(), maximums.max_upload_size).read_to_end(&mut tarball)?;
-        let hex_cksum: String = Sha256::digest(&tarball).encode_hex();
         let pkg_name = format!("{}-{}", krate.name, vers);
         let cargo_vcs_info = verify_tarball(&pkg_name, &tarball, maximums.max_unpack_size)?;
         let pkg_path_in_vcs = cargo_vcs_info.map(|info| info.path_in_vcs);
@@ -217,7 +226,7 @@ pub fn publish(req: &mut dyn RequestExt) -> EndpointResult {
             .uploader()
             .upload_crate(app.http_client(), tarball, &krate, vers)?;
 
-        let (features, features2): (HashMap<_, _>, HashMap<_, _>) =
+        let (features, features2): (BTreeMap<_, _>, BTreeMap<_, _>) =
             features.into_iter().partition(|(_k, vals)| {
                 !vals
                     .iter()
@@ -248,7 +257,7 @@ pub fn publish(req: &mut dyn RequestExt) -> EndpointResult {
         // warnings at this time, but if we need to, the field is available.
         let warnings = PublishWarnings {
             invalid_categories: ignored_invalid_categories,
-            invalid_badges: ignored_invalid_badges,
+            invalid_badges: vec![],
             other: vec![],
         };
 
@@ -257,6 +266,19 @@ pub fn publish(req: &mut dyn RequestExt) -> EndpointResult {
             warnings,
         }))
     })
+}
+
+/// Counts the number of versions for `krate_id` that were published within
+/// the last 24 hours.
+fn count_versions_published_today(krate_id: i32, conn: &PgConnection) -> QueryResult<i64> {
+    use crate::schema::versions::dsl::*;
+    use diesel::dsl::{now, IntervalDsl};
+
+    versions
+        .filter(crate_id.eq(krate_id))
+        .filter(created_at.gt(now - 24.hours()))
+        .count()
+        .get_result(conn)
 }
 
 /// Used by the `krate::new` function.
@@ -328,7 +350,7 @@ pub fn add_dependencies(
 
             // Match only identical names to ensure the index always references the original crate name
             let krate:Crate = Crate::by_exact_name(&dep.name)
-                .first(&*conn)
+                .first(conn)
                 .map_err(|_| cargo_err(&format_args!("no known crate named `{}`", &*dep.name)))?;
 
             if let Ok(version_req) = semver::VersionReq::parse(&dep.version_req.0) {
@@ -367,6 +389,7 @@ pub fn add_dependencies(
                     default_features.eq(dep.default_features),
                     features.eq(&dep.features),
                     target.eq(dep.target.as_deref()),
+                    explicit_name.eq(dep.explicit_name_in_toml.as_deref())
                 ),
             ))
         })

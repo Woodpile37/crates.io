@@ -22,13 +22,14 @@ name = "all"
 path = "src/tests/all.rs"
 
 [dependencies]
-anyhow = "=1.0.58"
-base64 = "=0.13.0"
+anyhow = "=1.0.66"
+aws-sigv4 = "=0.49.0"
+base64 = "=0.13.1"
 cargo-registry-index = { path = "cargo-registry-index" }
 cargo-registry-markdown = { path = "cargo-registry-markdown" }
 cargo-registry-s3 = { path = "cargo-registry-s3" }
-chrono = { version = "=0.4.19", features = ["serde"] }
-clap = { version = "=3.2.12", features = ["derive", "unicode"] }
+chrono = { version = "=0.4.22", features = ["serde"] }
+clap = { version = "=4.0.18", features = ["derive", "unicode", "wrap_help"] }
 
 conduit = "=0.10.0"
 conduit-conditional-get = "=0.10.0"
@@ -39,58 +40,59 @@ conduit-middleware = "=0.10.0"
 conduit-router = "=0.10.0"
 conduit-static = "=0.10.0"
 
-cookie = { version = "=0.16.0", features = ["secure"] }
-dashmap = { version = "=5.3.4", features = ["raw-api"] }
+cookie = { version = "=0.16.1", features = ["secure"] }
+dashmap = { version = "=5.4.0", features = ["raw-api"] }
 derive_deref = "=1.1.1"
-dialoguer = "=0.10.1"
+dialoguer = "=0.10.2"
 diesel = { version = "=1.4.8", features = ["postgres", "serde_json", "chrono", "r2d2"] }
 diesel_full_text_search = "=1.0.1"
 diesel_migrations = { version = "=1.4.0", features = ["postgres"] }
 dotenv = "=0.15.0"
 flate2 = "=1.0.24"
-futures-channel = { version = "=0.3.21", default-features = false }
-futures-util = "=0.3.21"
-hashbrown = { version = "=0.12.2", default-features = false }
+futures-channel = { version = "=0.3.25", default-features = false }
+futures-util = "=0.3.25"
+hashbrown = { version = "=0.12.3", default-features = false }
 hex = "=0.4.3"
 http = "=0.2.8"
 hyper = { version = "=0.14.20", features = ["client", "http1"] }
 indexmap = { version = "=1.9.1", features = ["serde-1"] }
-indicatif = "=0.16.2"
+indicatif = "=0.17.1"
 ipnetwork = "=0.20.0"
 tikv-jemallocator = { version = "=0.5.0", features = ['unprefixed_malloc_on_supported_platforms', 'profiling'] }
-lettre = { version = "=0.10.0", default-features = false, features = ["file-transport", "smtp-transport", "native-tls", "hostname", "builder"] }
-minijinja = "=0.17.0"
-moka = "=0.9.0"
+lettre = { version = "=0.10.1", default-features = false, features = ["file-transport", "smtp-transport", "native-tls", "hostname", "builder"] }
+minijinja = "=0.24.0"
+moka = "=0.9.4"
 oauth2 = { version = "=4.2.3", default-features = false, features = ["reqwest"] }
 parking_lot = "=0.12.1"
-prometheus = { version = "=0.13.1", default-features = false }
+prometheus = { version = "=0.13.3", default-features = false }
 rand = "=0.8.5"
-reqwest = { version = "=0.11.11", features = ["blocking", "gzip", "json"] }
+reqwest = { version = "=0.11.12", features = ["blocking", "gzip", "json"] }
 scheduled-thread-pool = "=0.2.6"
-semver = { version = "=1.0.12", features = ["serde"] }
+semver = { version = "=1.0.14", features = ["serde"] }
 sentry = { version = "=0.27.0", features = ["tracing"] }
 sentry-conduit = { version = "=0.7.0", default-features = false }
-serde = { version = "=1.0.139", features = ["derive"] }
-serde_json = "=1.0.82"
-sha2 = "=0.10.2"
-spdx = "=0.8.1"
+serde = { version = "=1.0.147", features = ["derive"] }
+serde_json = "=1.0.87"
+sha2 = "=0.10.6"
+spdx = "=0.9.0"
 swirl = { git = "https://github.com/sgrif/swirl.git", rev = "e87cf37" }
 tar = "=0.4.38"
 tempfile = "=3.3.0"
-thiserror = "=1.0.31"
-tokio = { version = "=1.20.0", features = ["net", "signal", "io-std", "io-util", "rt-multi-thread", "macros"]}
+thiserror = "=1.0.37"
+tokio = { version = "=1.21.2", features = ["net", "signal", "io-std", "io-util", "rt-multi-thread", "macros"]}
 toml = "=0.5.9"
-tracing = "=0.1.35"
-tracing-subscriber = { version = "=0.3.14", features = ["env-filter"] }
-url = "=2.2.2"
+tracing = "=0.1.37"
+tracing-subscriber = { version = "=0.3.16", features = ["env-filter"] }
+url = "=2.3.1"
 
 [dev-dependencies]
 cargo-registry-index = { path = "cargo-registry-index", features = ["testing"] }
-claim = { git = "https://github.com/Turbo87/rust-claim.git", rev = "23892a3" }
+claims = "=0.7.1"
 conduit-test = "=0.10.0"
 hyper-tls = "=0.5.0"
-lazy_static = "=1.4.0"
-tokio = "=1.20.0"
+insta = { version = "=1.21.0", features = ["redactions", "yaml"] }
+once_cell = "=1.15.0"
+tokio = "=1.21.2"
 tower-service = "=0.3.2"
 
 [build-dependencies]

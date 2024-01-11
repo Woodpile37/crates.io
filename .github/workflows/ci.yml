@@ -11,7 +11,8 @@ on:
 
 env:
   DIESEL_CLI_VERSION: 1.4.1
-  RUST_VERSION: 1.62.0
+  PNPM_VERSION: 7.9.0
+  RUST_VERSION: 1.64.0
 
 jobs:
   frontend:
@@ -26,25 +27,33 @@ jobs:
       PERCY_PROJECT: crates-io/crates.io
 
     steps:
-      - uses: actions/checkout@v3.0.2
-      - uses: volta-cli/action@v1
+      - uses: actions/checkout@v3.1.0
+
+      - uses: pnpm/action-setup@v2.2.4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - uses: actions/setup-node@v3.5.1
+        with:
+          cache: pnpm
+          node-version-file: package.json
 
       - name: Install node modules
-        run: yarn install
+        run: pnpm install
 
       - name: Lint
         run: |
-          yarn lint:hbs
-          yarn lint:js
-          yarn lint:deps
+          pnpm lint:hbs
+          pnpm lint:js
+          pnpm lint:deps
 
       - name: Run percy exec
         if: github.repository == 'rust-lang/crates.io'
-        run: npx percy exec -- npm run test-coverage
+        run: pnpm percy exec -- pnpm test-coverage
 
       - name: test-coverage
         if: github.repository != 'rust-lang/crates.io'
-        run: yarn test-coverage
+        run: pnpm test-coverage
 
   backend-lint:
     name: Backend (linting)
@@ -54,13 +63,13 @@ jobs:
       RUSTFLAGS: "-D warnings"
 
     steps:
-      - uses: actions/checkout@v3.0.2
+      - uses: actions/checkout@v3.1.0
 
       - run: rustup default ${{ env.RUST_VERSION }}
       - run: rustup component add rustfmt
       - run: rustup component add clippy
 
-      - uses: Swatinem/rust-cache@v1.4.0
+      - uses: Swatinem/rust-cache@v2.0.1
 
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --all-features --all
@@ -98,7 +107,7 @@ jobs:
           - 5432:5432
 
     steps:
-      - uses: actions/checkout@v3.0.2
+      - uses: actions/checkout@v3.1.0
 
       - name: Install ${{ env.RUST_VERSION }} Rust
         if: matrix.rust == 'stable'
@@ -112,7 +121,7 @@ jobs:
           rustup update ${{ matrix.rust }}
           rustup default ${{ matrix.rust }}
 
-      - uses: Swatinem/rust-cache@v1.4.0
+      - uses: Swatinem/rust-cache@v2.0.1
 
       - name: Setup database
         run: |
@@ -121,30 +130,3 @@ jobs:
 
       - name: Run tests
         run: cargo test --workspace
-
-
-  # These jobs doesn't actually test anything, but they're only used to tell
-  # bors the build completed, as there is no practical way to detect when a
-  # workflow is successful listening to webhooks only.
-  #
-  # ALL THE PREVIOUS JOBS NEEDS TO BE ADDED TO THE `needs` SECTION OF THIS JOB!
-
-  end-success:
-    name: bors build finished
-    if: success()
-    runs-on: ubuntu-latest
-    needs: [frontend, backend, backend-lint]
-
-    steps:
-      - name: Mark the job as successful
-        run: exit 0
-
-  end-failure:
-    name: bors build finished
-    if: "!success()"
-    runs-on: ubuntu-latest
-    needs: [frontend, backend, backend-lint]
-
-    steps:
-      - name: Mark the job as a failure
-        run: exit 1

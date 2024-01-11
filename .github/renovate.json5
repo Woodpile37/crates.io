@@ -12,8 +12,6 @@
     ],
     "js": {
         "labels": ["A-frontend"],
-        "reviewers": ["locks", "pichfl", "Turbo87"],
-        "reviewersSampleSize": 1,
     },
     "rust": {
         "labels": ["A-backend"],
@@ -48,7 +46,6 @@
             "lookupNameTemplate": "rust-lang/rust",
         }
     ],
-    "postUpdateOptions": ["yarnDedupeFewer"],
     "packageRules": [{
         "matchPackageNames": ["ember-cli", "ember-data", "ember-source"],
         "separateMinorPatch": true,
@@ -77,5 +74,11 @@
             "^sentry-conduit$",
         ],
         "groupName": "conduit packages",
+    }, {
+        "matchPackagePatterns": [
+            "^diesel$",
+            "^diesel_",
+        ],
+        "groupName": "diesel packages",
     }],
 }

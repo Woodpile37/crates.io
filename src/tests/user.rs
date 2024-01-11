@@ -117,6 +117,7 @@ fn me() {
     let user = app.db_new_user("foo");
     let json = user.show_me();
 
+    assert!(!json.user.admin);
     assert_eq!(json.owned_crates.len(), 0);
 
     app.db(|conn| {
@@ -126,6 +127,11 @@ fn me() {
     let updated_json = user.show_me();
 
     assert_eq!(updated_json.owned_crates.len(), 1);
+
+    let admin_user = app.db_new_user("carols10cents");
+    let admin_json = admin_user.show_me();
+
+    assert!(admin_json.user.admin);
 }
 
 #[test]
@@ -437,7 +443,7 @@ fn github_with_email_does_not_overwrite_email() {
     let original_email: String = app.db(|conn| {
         Email::belonging_to(model)
             .select(emails::email)
-            .first(&*conn)
+            .first(conn)
             .unwrap()
     });
 
@@ -573,7 +579,7 @@ fn test_confirm_user_email() {
     let email_token: String = app.db(|conn| {
         Email::belonging_to(user_model)
             .select(emails::token)
-            .first(&*conn)
+            .first(conn)
             .unwrap()
     });
 
@@ -747,7 +753,7 @@ fn test_update_email_notifications_not_owned() {
             crate_owners::table
                 .select(crate_owners::email_notifications)
                 .filter(crate_owners::crate_id.eq(not_my_crate.id))
-                .first(&*conn)
+                .first(conn)
         })
         .unwrap();
 

@@ -85,7 +85,7 @@ mod test {
     use super::*;
     use crate::email::Emails;
     use crate::models::{Crate, NewCrate, NewUser, NewVersion, User, Version};
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
 
     fn user(conn: &PgConnection) -> User {
         NewUser::new(2, "login", None, None, "access_token")
@@ -103,11 +103,13 @@ mod test {
         let version = NewVersion::new(
             krate.id,
             &semver::Version::parse("1.0.0").unwrap(),
-            &HashMap::new(),
+            &BTreeMap::new(),
             None,
             None,
             0,
             user_id,
+            "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            None,
         )
         .unwrap();
         let version = version.save(conn, "someone@example.com").unwrap();

@@ -3,11 +3,15 @@
     align-items: center;
 }
 
+.title {
+    composes: heading from '../crate-sidebar.module.css';
+}
+
 .icon {
     flex-shrink: 0;
     height: 1em;
     width: auto;
-    margin-right: 7px;
+    margin-right: var(--space-2xs);
 }
 
 .link {

@@ -8,6 +8,8 @@
 # dependencies
 /node_modules
 /bower_components
+package-lock.json
+yarn.lock
 
 # misc
 /.eslintcache

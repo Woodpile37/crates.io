@@ -2,8 +2,8 @@
 
 [![What's Deployed](https://img.shields.io/badge/whatsdeployed-prod-green.svg)](https://whatsdeployed.io/s-9IG)
 
-Source code for the default [Cargo](http://doc.crates.io) registry. Viewable
-online at [crates.io](https://crates.io).
+Source code for the default [Cargo](https://doc.rust-lang.org/cargo/) registry.
+Viewable online at [crates.io](https://crates.io).
 
 ## Status of crates.io
 
@@ -15,7 +15,7 @@ of the following ways:
 
 - [File a new issue](https://github.com/rust-lang/crates.io/issues/new)
 - Email [help@crates.io](mailto:help@crates.io)
-- Chat on ops > #crates-io-team channel on https://discord.gg/rust-lang
+- Chat on web presence > #crates-io-team channel on https://discord.gg/rust-lang
 
 A volunteer will get back to you as soon as possible.
 
@@ -47,10 +47,6 @@ category from existing categories.
 
 After your PR is accepted, the next time that crates.io is deployed the
 categories will be synced from this file.
-
-## Running a mirror
-
-Please see [docs/MIRROR.md](https://github.com/rust-lang/crates.io/blob/master/docs/MIRROR.md) for instructions on setting up a mirror of crates.io.
 
 ## License
 

@@ -1,5 +1,7 @@
 import Controller from '@ember/controller';
+import { action } from '@ember/object';
 import { inject as service } from '@ember/service';
+import { tracked } from '@glimmer/tracking';
 
 import { task } from 'ember-concurrency';
 import { alias } from 'macro-decorators';
@@ -9,6 +11,16 @@ export default class CrateVersionController extends Controller {
 
   get downloadsContext() {
     return this.requestedVersion ? this.currentVersion : this.crate;
+  }
+
+  @tracked stackedGraph = true;
+
+  @action setStackedGraph() {
+    this.stackedGraph = true;
+  }
+
+  @action setUnstackedGraph() {
+    this.stackedGraph = false;
   }
 
   @alias('downloadsContext.version_downloads.content') downloads;
@@ -22,12 +34,12 @@ export default class CrateVersionController extends Controller {
 
   @alias('loadReadmeTask.last.value') readme;
 
-  @task *loadReadmeTask() {
+  loadReadmeTask = task(async () => {
     let version = this.currentVersion;
 
     let readme = version.loadReadmeTask.lastSuccessful
       ? version.loadReadmeTask.lastSuccessful.value
-      : yield version.loadReadmeTask.perform();
+      : await version.loadReadmeTask.perform();
 
     if (typeof document !== 'undefined') {
       setTimeout(() => {
@@ -38,5 +50,5 @@ export default class CrateVersionController extends Controller {
     }
 
     return readme;
-  }
+  });
 }

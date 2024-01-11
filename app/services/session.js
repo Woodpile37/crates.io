@@ -46,7 +46,7 @@ export default class SessionService extends Service {
    * @see https://developer.github.com/v3/oauth/#redirect-users-to-request-github-access
    * @see `github-authorize` route
    */
-  @task *loginTask() {
+  loginTask = task(async () => {
     let windowDimensions = [
       'width=1000',
       'height=450',
@@ -69,28 +69,22 @@ export default class SessionService extends Service {
     // we can't call `window.open()` with this URL directly, because it might trigger
     // the popup window prevention mechanism of the browser, since the async opening
     // can not be associated with the original user click event
-    let { url } = yield ajax(`/api/private/session/begin`);
+    let { url } = await ajax(`/api/private/session/begin`);
     win.location = url;
 
-    let event = yield race([waitForEvent(window, 'message'), this.windowCloseWatcherTask.perform(win)]);
+    let event = await race([this.windowEventWatcherTask.perform(), this.windowCloseWatcherTask.perform(win)]);
     if (event.closed) {
       this.notifications.warning('Login was canceled because the popup window was closed.');
       return;
     }
 
     win.close();
-    if (event.origin !== window.location.origin || !event.data) {
-      return;
-    }
 
-    let { code, state } = event.data;
-    if (!code || !state) {
-      return;
-    }
+    let { code, state } = event;
 
-    let response = yield fetch(`/api/private/session/authorize?code=${code}&state=${state}`);
+    let response = await fetch(`/api/private/session/authorize?code=${code}&state=${state}`);
     if (!response.ok) {
-      let json = yield response.json();
+      let json = await response.json();
 
       if (json && json.errors) {
         this.notifications.error(`Failed to log in: ${json.errors[0].detail}`);
@@ -102,42 +96,58 @@ export default class SessionService extends Service {
 
     this.isLoggedIn = true;
 
-    yield this.loadUserTask.perform();
+    await this.loadUserTask.perform();
 
     // perform the originally saved transition, if it exists
     let transition = this.savedTransition;
     if (transition) {
       transition.retry();
     }
-  }
+  });
 
-  @task *windowCloseWatcherTask(window) {
+  windowEventWatcherTask = task(async () => {
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      let event = await waitForEvent(window, 'message');
+      if (event.origin !== window.location.origin || !event.data) {
+        continue;
+      }
+
+      let { code, state } = event.data;
+      if (!code || !state) {
+        continue;
+      }
+
+      return { code, state };
+    }
+  });
+
+  windowCloseWatcherTask = task(async window => {
+    // eslint-disable-next-line no-constant-condition
     while (true) {
       if (window.closed) {
         return { closed: true };
       }
-      yield rawTimeout(10);
+      await rawTimeout(10);
     }
-  }
+  });
 
-  @task *logoutTask() {
-    yield ajax(`/api/private/session`, { method: 'DELETE' });
+  logoutTask = task(async () => {
+    await ajax(`/api/private/session`, { method: 'DELETE' });
 
-    this.savedTransition = null;
     this.isLoggedIn = false;
 
-    yield this.loadUserTask.cancelAll({ resetState: true });
-    this.sentry.setUser(null);
+    // We perform a proper page navigation here instead of an in-app transition to ensure
+    // that the Ember Data store and any other in-memory data is cleared on logout.
+    window.location.assign('/');
+  });
 
-    this.router.transitionTo('index');
-  }
-
-  @dropTask *loadUserTask() {
+  loadUserTask = dropTask(async () => {
     if (!this.isLoggedIn) return {};
 
     let response;
     try {
-      response = yield ajax('/api/v1/me');
+      response = await ajax('/api/v1/me');
     } catch {
       return {};
     }
@@ -149,5 +159,5 @@ export default class SessionService extends Service {
     this.sentry.setUser({ id });
 
     return { currentUser, ownedCrates };
-  }
+  });
 }
