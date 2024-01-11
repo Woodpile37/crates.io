@@ -1,24 +1,10 @@
-# renovate: datasource=node depName=node
-ARG NODE_VERSION=20.11.0
-
-FROM node:${NODE_VERSION}-alpine
-
-# renovate: datasource=npm depName=pnpm
-ARG PNPM_VERSION=8.14.0
-
-# Install `pnpm`
-RUN npm install --global pnpm@$PNPM_VERSION
+FROM node:16.20-alpine
 
 WORKDIR /app
+COPY package.json yarn.lock /app/
 
-COPY pnpm-lock.yaml /app/
-
-# Download all locked dependencies
-RUN pnpm fetch
+RUN yarn install
 
 COPY . /app
 
-# Install dependencies from previously downloaded pnpm store
-RUN pnpm install --offline
-
-ENTRYPOINT ["pnpm", "start:staging"]
+ENTRYPOINT ["yarn", "start:staging"]
