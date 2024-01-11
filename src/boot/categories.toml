@@ -29,7 +29,7 @@
 [accessibility]
 name = "Accessibility"
 description = """
-Tools for making your creations usable by as many people as possible. \
+Assistive technology that helps overcome disabilities and impairments to make software usable by as many people as possible. \
 """
 
 [aerospace]
@@ -245,7 +245,7 @@ Crates to help you verify the correctness of your code.\
 [email]
 name = "Email"
 description = """
-Crates to help with Sending, receiving, formatting, and parsing email.\
+Crates to help with sending, receiving, formatting, and parsing email.\
 """
 
 [embedded]
@@ -281,6 +281,12 @@ the API bindings category.
 name = "Filesystem"
 description = """
 Crates for dealing with files and filesystems.\
+"""
+
+[finance]
+name = "Finance"
+description = """
+Crates for dealing with money. Accounting, trading, investments, taxes, banking and payment processing using government-backed currencies.\
 """
 
 [game-engines]
@@ -396,6 +402,12 @@ description = """
 Crates that are able to function without the Rust standard library.
 """
 
+[no-std.categories.no-alloc]
+name = "No dynamic allocation"
+description = """
+Crates that are able to function without the Rust alloc crate.\
+"""
+
 [os]
 name = "Operating systems"
 description = """
@@ -487,10 +499,22 @@ Crates related to solving problems involving physics, chemistry, \
 biology, machine learning, geoscience, and other scientific fields.\
 """
 
+[science.categories.geo]
+name = "Geospatial"
+description = """
+Processing of spatial information, maps, navigation data, and geographic information systems.
+"""
+
 [science.categories.robotics]
 name = "Robotics"
 description = """
 Crates related to robotics.\
+"""
+
+[science.categories.neuroscience]
+name = "Neuroscience"
+description = """
+Crates for research tools and processing of data related to the brain and nervous system.\
 """
 
 [simulation]

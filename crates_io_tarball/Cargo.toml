@@ -1,0 +1,32 @@
+[package]
+name = "crates_io_tarball"
+version = "0.0.0"
+license = "MIT OR Apache-2.0"
+edition = "2021"
+
+[lints]
+workspace = true
+
+[features]
+builder = []
+
+[dependencies]
+cargo-manifest = "=0.13.0"
+derive_deref = "=1.1.1"
+flate2 = "=1.0.28"
+semver = { version = "=1.0.21", features = ["serde"] }
+serde = { version = "=1.0.195", features = ["derive"] }
+serde_json = "=1.0.111"
+tar = "=0.4.40"
+thiserror = "=1.0.56"
+toml = "=0.8.8"
+tracing = "=0.1.40"
+
+[dev-dependencies]
+anyhow = "=1.0.79"
+claims = "=0.7.1"
+clap = { version = "=4.4.14", features = ["derive", "unicode", "wrap_help"] }
+indicatif = { version = "=0.17.7", features = ["rayon"] }
+rayon = "=1.8.0"
+tracing-subscriber = { version = "=0.3.18", features = ["env-filter"] }
+walkdir = "=2.4.0"

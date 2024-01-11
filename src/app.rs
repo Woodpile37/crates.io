@@ -1,17 +1,21 @@
 //! Application-wide components in a struct accessible from each request
 
-use crate::db::{ConnectionConfig, DieselPool};
-use crate::{config, Env};
-use std::{sync::Arc, time::Duration};
+use crate::config;
+use crate::db::{ConnectionConfig, DieselPool, DieselPooledConn, PoolError};
+use std::ops::Deref;
+use std::sync::atomic::AtomicUsize;
+use std::sync::Arc;
 
 use crate::downloads_counter::DownloadsCounter;
 use crate::email::Emails;
-use crate::github::{GitHubClient, RealGitHubClient};
 use crate::metrics::{InstanceMetrics, ServiceMetrics};
+use crate::rate_limiter::RateLimiter;
+use crate::storage::Storage;
+use axum::extract::{FromRef, FromRequestParts, State};
+use crates_io_github::GitHubClient;
 use diesel::r2d2;
-use moka::sync::{Cache, CacheBuilder};
+use moka::future::{Cache, CacheBuilder};
 use oauth2::basic::BasicClient;
-use reqwest::blocking::Client;
 use scheduled_thread_pool::ScheduledThreadPool;
 
 /// The `App` struct holds the main components of the application like
@@ -44,18 +48,20 @@ pub struct App {
     /// Backend used to send emails
     pub emails: Emails,
 
+    /// Storage backend for crate files and other large objects.
+    pub storage: Arc<Storage>,
+
     /// Metrics related to the service as a whole
     pub service_metrics: ServiceMetrics,
 
     /// Metrics related to this specific instance of the service
     pub instance_metrics: InstanceMetrics,
 
-    /// A configured client for outgoing HTTP requests
-    ///
-    /// In production this shares a single connection pool across requests.  In tests
-    /// this is either None (in which case any attempt to create an outgoing connection
-    /// will panic) or a `Client` configured with a per-test replay proxy.
-    pub(crate) http_client: Option<Client>,
+    /// In-flight request counters for the `balance_capacity` middleware.
+    pub balance_capacity: BalanceCapacityState,
+
+    /// Rate limit select actions.
+    pub rate_limiter: RateLimiter,
 }
 
 impl App {
@@ -66,54 +72,33 @@ impl App {
     /// - GitHub OAuth
     /// - Database connection pools
     /// - A `git2::Repository` instance from the index repo checkout (that server.rs ensures exists)
-    pub fn new(config: config::Server, http_client: Option<Client>) -> App {
-        use oauth2::{AuthUrl, ClientId, ClientSecret, TokenUrl};
+    pub fn new(config: config::Server, emails: Emails, github: Box<dyn GitHubClient>) -> App {
+        use oauth2::{AuthUrl, TokenUrl};
 
         let instance_metrics =
             InstanceMetrics::new().expect("could not initialize instance metrics");
 
-        let github = Box::new(RealGitHubClient::new(
-            http_client.clone(),
-            config.gh_base_url.clone(),
-        ));
-
         let github_oauth = BasicClient::new(
-            ClientId::new(config.gh_client_id.clone()),
-            Some(ClientSecret::new(config.gh_client_secret.clone())),
+            config.gh_client_id.clone(),
+            Some(config.gh_client_secret.clone()),
             AuthUrl::new(String::from("https://github.com/login/oauth/authorize")).unwrap(),
             Some(
                 TokenUrl::new(String::from("https://github.com/login/oauth/access_token")).unwrap(),
             ),
         );
 
-        let db_helper_threads = match (dotenv::var("DB_HELPER_THREADS"), config.env()) {
-            (Ok(num), _) => num.parse().expect("couldn't parse DB_HELPER_THREADS"),
-            (_, Env::Production) => 3,
-            _ => 1,
-        };
+        let thread_pool = Arc::new(ScheduledThreadPool::new(config.db.helper_threads));
 
-        // Used as the connection and statement timeout value for the database pool(s)
-        let db_connection_timeout = match (dotenv::var("DB_TIMEOUT"), config.env()) {
-            (Ok(num), _) => num.parse().expect("couldn't parse DB_TIMEOUT"),
-            (_, Env::Production) => 10,
-            (_, Env::Test) => 1,
-            _ => 30,
-        };
-
-        let thread_pool = Arc::new(ScheduledThreadPool::new(db_helper_threads));
-
-        let primary_database = if config.use_test_database_pool {
-            DieselPool::new_test(&config.db, &config.db.primary.url)
-        } else {
+        let primary_database = {
             let primary_db_connection_config = ConnectionConfig {
-                statement_timeout: db_connection_timeout,
+                statement_timeout: config.db.statement_timeout,
                 read_only: config.db.primary.read_only_mode,
             };
 
             let primary_db_config = r2d2::Pool::builder()
                 .max_size(config.db.primary.pool_size)
                 .min_idle(config.db.primary.min_idle)
-                .connection_timeout(Duration::from_secs(db_connection_timeout))
+                .connection_timeout(config.db.connection_timeout)
                 .connection_customizer(Box::new(primary_db_connection_config))
                 .thread_pool(thread_pool.clone());
 
@@ -129,33 +114,29 @@ impl App {
         };
 
         let replica_database = if let Some(pool_config) = config.db.replica.as_ref() {
-            if config.use_test_database_pool {
-                Some(DieselPool::new_test(&config.db, &pool_config.url))
-            } else {
-                let replica_db_connection_config = ConnectionConfig {
-                    statement_timeout: db_connection_timeout,
-                    read_only: true,
-                };
+            let replica_db_connection_config = ConnectionConfig {
+                statement_timeout: config.db.statement_timeout,
+                read_only: true,
+            };
 
-                let replica_db_config = r2d2::Pool::builder()
-                    .max_size(pool_config.pool_size)
-                    .min_idle(pool_config.min_idle)
-                    .connection_timeout(Duration::from_secs(db_connection_timeout))
-                    .connection_customizer(Box::new(replica_db_connection_config))
-                    .thread_pool(thread_pool);
+            let replica_db_config = r2d2::Pool::builder()
+                .max_size(pool_config.pool_size)
+                .min_idle(pool_config.min_idle)
+                .connection_timeout(config.db.connection_timeout)
+                .connection_customizer(Box::new(replica_db_connection_config))
+                .thread_pool(thread_pool);
 
-                Some(
-                    DieselPool::new(
-                        &pool_config.url,
-                        &config.db,
-                        replica_db_config,
-                        instance_metrics
-                            .database_time_to_obtain_connection
-                            .with_label_values(&["follower"]),
-                    )
-                    .unwrap(),
+            Some(
+                DieselPool::new(
+                    &pool_config.url,
+                    &config.db,
+                    replica_db_config,
+                    instance_metrics
+                        .database_time_to_obtain_connection
+                        .with_label_values(&["follower"]),
                 )
-            }
+                .unwrap(),
+            )
         } else {
             None
         };
@@ -171,31 +152,109 @@ impl App {
             github_oauth,
             version_id_cacher,
             downloads_counter: DownloadsCounter::new(),
-            emails: Emails::from_environment(&config),
+            emails,
+            storage: Arc::new(Storage::from_config(&config.storage)),
             service_metrics: ServiceMetrics::new().expect("could not initialize service metrics"),
             instance_metrics,
-            http_client,
+            balance_capacity: Default::default(),
+            rate_limiter: RateLimiter::new(config.rate_limiter.clone()),
             config,
         }
     }
 
-    /// Returns a client for making HTTP requests to upload crate files.
-    ///
-    /// The client will go through a proxy if the application was configured via
-    /// `TestApp::with_proxy()`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the application was not initialized with a client.  This should only occur in
-    /// tests that were not properly initialized.
-    pub fn http_client(&self) -> &Client {
-        self.http_client
-            .as_ref()
-            .expect("No HTTP client is configured.  In tests, use `TestApp::with_proxy()`.")
+    /// A unique key to generate signed cookies
+    pub fn session_key(&self) -> &cookie::Key {
+        &self.config.session_key
     }
 
-    /// A unique key used with conduit_cookie to generate signed/encrypted cookies
-    pub fn session_key(&self) -> &str {
-        &self.config.session_key
+    /// Obtain a read/write database connection from the primary pool
+    #[instrument(skip_all)]
+    pub fn db_write(&self) -> Result<DieselPooledConn, PoolError> {
+        self.primary_database.get()
+    }
+
+    /// Obtain a readonly database connection from the replica pool
+    ///
+    /// If the replica pool is disabled or unavailable, the primary pool is used instead.
+    #[instrument(skip_all)]
+    pub fn db_read(&self) -> Result<DieselPooledConn, PoolError> {
+        let read_only_pool = self.read_only_replica_database.as_ref();
+        match read_only_pool.map(|pool| pool.get()) {
+            // Replica is available
+            Some(Ok(connection)) => Ok(connection),
+
+            // Replica is not available, but primary might be available
+            Some(Err(PoolError::UnhealthyPool)) => {
+                let _ = self
+                    .instance_metrics
+                    .database_fallback_used
+                    .get_metric_with_label_values(&["follower"])
+                    .map(|metric| metric.inc());
+
+                self.primary_database.get()
+            }
+
+            // Replica failed
+            Some(Err(error)) => Err(error),
+
+            // Replica is disabled, but primary might be available
+            None => self.primary_database.get(),
+        }
+    }
+
+    /// Obtain a readonly database connection from the primary pool
+    ///
+    /// If the primary pool is unavailable, the replica pool is used instead, if not disabled.
+    #[instrument(skip_all)]
+    pub fn db_read_prefer_primary(&self) -> Result<DieselPooledConn, PoolError> {
+        match (
+            self.primary_database.get(),
+            &self.read_only_replica_database,
+        ) {
+            // Primary is available
+            (Ok(connection), _) => Ok(connection),
+
+            // Primary is not available, but replica might be available
+            (Err(PoolError::UnhealthyPool), Some(read_only_pool)) => {
+                let _ = self
+                    .instance_metrics
+                    .database_fallback_used
+                    .get_metric_with_label_values(&["primary"])
+                    .map(|metric| metric.inc());
+
+                read_only_pool.get()
+            }
+
+            // Primary failed and replica is disabled
+            (Err(error), None) => Err(error),
+
+            // Primary failed
+            (Err(error), _) => Err(error),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct BalanceCapacityState {
+    pub in_flight_total: AtomicUsize,
+    pub in_flight_non_dl_requests: AtomicUsize,
+}
+
+#[derive(Clone, FromRequestParts)]
+#[from_request(via(State))]
+pub struct AppState(pub Arc<App>);
+
+// deref so you can still access the inner fields easily
+impl Deref for AppState {
+    type Target = App;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl FromRef<AppState> for cookie::Key {
+    fn from_ref(app: &AppState) -> Self {
+        app.session_key().clone()
     }
 }

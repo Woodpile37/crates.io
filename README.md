@@ -15,17 +15,17 @@ of the following ways:
 
 - [File a new issue](https://github.com/rust-lang/crates.io/issues/new)
 - Email [help@crates.io](mailto:help@crates.io)
-- Chat on web presence > #crates-io-team channel on https://discord.gg/rust-lang
+- Chat on the #t-crates-io Zulip stream on https://rust-lang.zulipchat.com/#narrow/stream/318791-t-crates-io/
 
 A volunteer will get back to you as soon as possible.
 
 ## Contributing
 
-Welcome! We love contributions! Crates.io is an [Ember](https://emberjs.com/)
+Welcome! We love contributions! crates.io is an [Ember](https://emberjs.com/)
 frontend with a Rust backend, and there are many tasks appropriate for a
 variety of skill levels.
 
-Please see [docs/CONTRIBUTING.md](https://github.com/rust-lang/crates.io/blob/master/docs/CONTRIBUTING.md) for ideas about what to work on and how to set up a development
+Please see [docs/CONTRIBUTING.md](https://github.com/rust-lang/crates.io/blob/main/docs/CONTRIBUTING.md) for ideas about what to work on and how to set up a development
 environment.
 
 ### Categories
@@ -35,7 +35,7 @@ Adding or editing the categories and corresponding descriptions displayed on
 development environment set up.
 
 The list of categories available on crates.io is stored in
-[`src/boot/categories.toml`](https://github.com/rust-lang/crates.io/blob/master/src/boot/categories.toml).
+[`src/boot/categories.toml`](https://github.com/rust-lang/crates.io/blob/main/src/boot/categories.toml).
 To propose adding, removing, or changing a category, send a pull request making
 the appropriate change to that file as noted in the comment at the top of the
 file. Please add a description that will help others to know what crates are in
@@ -52,7 +52,7 @@ categories will be synced from this file.
 
 Licensed under either of these:
 
- * Apache License, Version 2.0, ([LICENSE-APACHE](LICENSE-APACHE) or
-   https://www.apache.org/licenses/LICENSE-2.0)
- * MIT license ([LICENSE-MIT](LICENSE-MIT) or
-   https://opensource.org/licenses/MIT)
+- Apache License, Version 2.0, ([LICENSE-APACHE](LICENSE-APACHE) or
+  https://www.apache.org/licenses/LICENSE-2.0)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or
+  https://opensource.org/licenses/MIT)

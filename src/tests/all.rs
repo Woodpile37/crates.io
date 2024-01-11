@@ -3,46 +3,39 @@
 #[macro_use]
 extern crate claims;
 #[macro_use]
-extern crate diesel;
-#[macro_use]
 extern crate serde;
 #[macro_use]
 extern crate serde_json;
-#[macro_use]
-extern crate tracing;
 
 use crate::util::{RequestHelper, TestApp};
-use cargo_registry::{
-    models::{Crate, CrateOwner, NewCategory, NewTeam, NewUser, Team, User},
+use crates_io::{
+    models::{Crate, CrateOwner, NewCategory, NewTeam, NewUser, OwnerKind, Team, User},
     schema::crate_owners,
     views::{
         EncodableCategory, EncodableCategoryWithSubcategories, EncodableCrate, EncodableKeyword,
         EncodableOwner, EncodableVersion, GoodCrate,
     },
 };
-use std::{
-    borrow::Cow,
-    sync::atomic::{AtomicUsize, Ordering},
-};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use diesel::prelude::*;
 
 mod account_lock;
 mod admin_actions;
 mod authentication;
-mod badge;
 mod blocked_routes;
 mod builders;
 mod categories;
-mod category;
 mod dump_db;
-mod keyword;
+mod github_secret_scanning;
 mod krate;
-mod metrics;
+mod middleware;
+mod models;
 mod not_found_error;
 mod owners;
+mod pagination;
 mod read_only_mode;
-mod record;
+mod routes;
 mod schema_details;
 mod server;
 mod server_binary;
@@ -52,6 +45,7 @@ mod unhealthy_database;
 mod user;
 mod util;
 mod version;
+mod worker;
 
 #[derive(Deserialize)]
 pub struct CrateList {
@@ -65,6 +59,7 @@ struct CrateMeta {
     prev_page: Option<String>,
 }
 #[derive(Deserialize)]
+#[allow(dead_code)]
 pub struct CrateResponse {
     #[serde(rename = "crate")]
     krate: EncodableCrate,
@@ -98,20 +93,8 @@ pub struct CategoryMeta {
 }
 #[derive(Deserialize)]
 pub struct OkBool {
+    #[allow(dead_code)]
     ok: bool,
-}
-
-// Return the environment variable only if it has been defined
-#[track_caller]
-fn env(var: &str) -> String {
-    match dotenv::var(var) {
-        Ok(ref s) if s.is_empty() => panic!("environment variable `{}` must not be empty", var),
-        Ok(s) => s,
-        _ => panic!(
-            "environment variable `{}` must be defined and valid unicode",
-            var
-        ),
-    }
 }
 
 static NEXT_GH_ID: AtomicUsize = AtomicUsize::new(0);
@@ -122,7 +105,7 @@ fn new_user(login: &str) -> NewUser<'_> {
         gh_login: login,
         name: None,
         gh_avatar: None,
-        gh_access_token: Cow::Borrowed("some random token"),
+        gh_access_token: "some random token",
     }
 }
 
@@ -136,12 +119,17 @@ fn new_team(login: &str) -> NewTeam<'_> {
     }
 }
 
-fn add_team_to_crate(t: &Team, krate: &Crate, u: &User, conn: &PgConnection) -> QueryResult<()> {
+fn add_team_to_crate(
+    t: &Team,
+    krate: &Crate,
+    u: &User,
+    conn: &mut PgConnection,
+) -> QueryResult<()> {
     let crate_owner = CrateOwner {
         crate_id: krate.id,
         owner_id: t.id,
         created_by: u.id,
-        owner_kind: 1, // Team owner kind is 1 according to owner.rs
+        owner_kind: OwnerKind::Team,
         email_notifications: true,
     };
 
@@ -161,21 +149,4 @@ fn new_category<'a>(category: &'a str, slug: &'a str, description: &'a str) -> N
         slug,
         description,
     }
-}
-
-// This reflects the configuration of our test environment. In the production application, this
-// does not hold true.
-#[test]
-fn multiple_live_references_to_the_same_connection_can_be_checked_out() {
-    use std::ptr;
-
-    let (app, _) = TestApp::init().empty();
-    let app = app.as_inner();
-
-    let conn1 = app.primary_database.get().unwrap();
-    let conn2 = app.primary_database.get().unwrap();
-    let conn1_ref: &PgConnection = &conn1;
-    let conn2_ref: &PgConnection = &conn2;
-
-    assert!(ptr::eq(conn1_ref, conn2_ref));
 }

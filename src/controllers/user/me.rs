@@ -1,3 +1,5 @@
+use crate::auth::AuthCheck;
+use secrecy::{ExposeSecret, SecretString};
 use std::collections::HashMap;
 
 use crate::controllers::frontend_prelude::*;
@@ -12,254 +14,312 @@ use crate::schema::{crate_owners, crates, emails, follows, users, versions};
 use crate::views::{EncodableMe, EncodablePrivateUser, EncodableVersion, OwnedCrate};
 
 /// Handles the `GET /me` route.
-pub fn me(req: &mut dyn RequestExt) -> EndpointResult {
-    let user_id = req.authenticate()?.forbid_api_token_auth()?.user_id();
-    let conn = req.db_read_prefer_primary()?;
+pub async fn me(app: AppState, req: Parts) -> AppResult<Json<EncodableMe>> {
+    spawn_blocking(move || {
+        let conn = &mut *app.db_read_prefer_primary()?;
+        let user_id = AuthCheck::only_cookie().check(&req, conn)?.user_id();
 
-    let (user, verified, email, verification_sent): (User, Option<bool>, Option<String>, bool) =
-        users::table
-            .find(user_id)
-            .left_join(emails::table)
-            .select((
-                users::all_columns,
-                emails::verified.nullable(),
-                emails::email.nullable(),
-                emails::token_generated_at.nullable().is_not_null(),
-            ))
-            .first(&*conn)?;
+        let (user, verified, email, verification_sent): (User, Option<bool>, Option<String>, bool) =
+            users::table
+                .find(user_id)
+                .left_join(emails::table)
+                .select((
+                    users::all_columns,
+                    emails::verified.nullable(),
+                    emails::email.nullable(),
+                    emails::token_generated_at.nullable().is_not_null(),
+                ))
+                .first(conn)?;
 
-    let owned_crates = CrateOwner::by_owner_kind(OwnerKind::User)
-        .inner_join(crates::table)
-        .filter(crate_owners::owner_id.eq(user_id))
-        .select((crates::id, crates::name, crate_owners::email_notifications))
-        .order(crates::name.asc())
-        .load(&*conn)?
-        .into_iter()
-        .map(|(id, name, email_notifications)| OwnedCrate {
-            id,
-            name,
-            email_notifications,
-        })
-        .collect();
+        let owned_crates = CrateOwner::by_owner_kind(OwnerKind::User)
+            .inner_join(crates::table)
+            .filter(crate_owners::owner_id.eq(user_id))
+            .select((crates::id, crates::name, crate_owners::email_notifications))
+            .order(crates::name.asc())
+            .load(conn)?
+            .into_iter()
+            .map(|(id, name, email_notifications)| OwnedCrate {
+                id,
+                name,
+                email_notifications,
+            })
+            .collect();
 
-    let verified = verified.unwrap_or(false);
-    let verification_sent = verified || verification_sent;
-    Ok(req.json(&EncodableMe {
-        user: EncodablePrivateUser::from(user, email, verified, verification_sent),
-        owned_crates,
-    }))
+        let verified = verified.unwrap_or(false);
+        let verification_sent = verified || verification_sent;
+        Ok(Json(EncodableMe {
+            user: EncodablePrivateUser::from(user, email, verified, verification_sent),
+            owned_crates,
+        }))
+    })
+    .await
 }
 
 /// Handles the `GET /me/updates` route.
-pub fn updates(req: &mut dyn RequestExt) -> EndpointResult {
-    use diesel::dsl::any;
+pub async fn updates(app: AppState, req: Parts) -> AppResult<Json<Value>> {
+    spawn_blocking(move || {
+        let conn = &mut app.db_read_prefer_primary()?;
+        let auth = AuthCheck::only_cookie().check(&req, conn)?;
+        let user = auth.user();
 
-    let authenticated_user = req.authenticate()?.forbid_api_token_auth()?;
-    let user = authenticated_user.user();
+        let followed_crates = Follow::belonging_to(user).select(follows::crate_id);
+        let query = versions::table
+            .inner_join(crates::table)
+            .left_outer_join(users::table)
+            .filter(crates::id.eq_any(followed_crates))
+            .order(versions::created_at.desc())
+            .select((
+                versions::all_columns,
+                crates::name,
+                users::all_columns.nullable(),
+            ))
+            .pages_pagination(PaginationOptions::builder().gather(&req)?);
+        let data: Paginated<(Version, String, Option<User>)> = query.load(conn)?;
+        let more = data.next_page_params().is_some();
+        let versions = data.iter().map(|(v, _, _)| v).cloned().collect::<Vec<_>>();
+        let data = data
+            .into_iter()
+            .zip(VersionOwnerAction::for_versions(conn, &versions)?)
+            .map(|((v, cn, pb), voas)| (v, cn, pb, voas));
 
-    let followed_crates = Follow::belonging_to(&user).select(follows::crate_id);
-    let query = versions::table
-        .inner_join(crates::table)
-        .left_outer_join(users::table)
-        .filter(crates::id.eq(any(followed_crates)))
-        .order(versions::created_at.desc())
-        .select((
-            versions::all_columns,
-            crates::name,
-            users::all_columns.nullable(),
-        ))
-        .pages_pagination(PaginationOptions::builder().gather(req)?);
-    let conn = req.db_read_prefer_primary()?;
-    let data: Paginated<(Version, String, Option<User>)> = query.load(&conn)?;
-    let more = data.next_page_params().is_some();
-    let versions = data.iter().map(|(v, _, _)| v).cloned().collect::<Vec<_>>();
-    let data = data
-        .into_iter()
-        .zip(VersionOwnerAction::for_versions(&conn, &versions)?.into_iter())
-        .map(|((v, cn, pb), voas)| (v, cn, pb, voas));
+        let versions = data
+            .into_iter()
+            .map(|(version, crate_name, published_by, actions)| {
+                EncodableVersion::from(version, &crate_name, published_by, actions)
+            })
+            .collect::<Vec<_>>();
 
-    let versions = data
-        .into_iter()
-        .map(|(version, crate_name, published_by, actions)| {
-            EncodableVersion::from(version, &crate_name, published_by, actions)
-        })
-        .collect::<Vec<_>>();
-
-    Ok(req.json(&json!({
-        "versions": versions,
-        "meta": { "more": more },
-    })))
+        Ok(Json(json!({
+            "versions": versions,
+            "meta": { "more": more },
+        })))
+    })
+    .await
 }
 
 /// Handles the `PUT /users/:user_id` route.
-pub fn update_user(req: &mut dyn RequestExt) -> EndpointResult {
-    use self::emails::user_id;
-    use diesel::insert_into;
+pub async fn update_user(
+    state: AppState,
+    Path(param_user_id): Path<i32>,
+    req: BytesRequest,
+) -> AppResult<Response> {
+    spawn_blocking(move || {
+        use self::emails::user_id;
+        use diesel::insert_into;
 
-    let authenticated_user = req.authenticate()?;
+        let conn = &mut state.db_write()?;
 
-    let mut body = String::new();
-    req.body().read_to_string(&mut body)?;
+        let auth = AuthCheck::default().check(&req, conn)?;
+        let user = auth.user();
 
-    let param_user_id = &req.params()["user_id"];
-    let conn = req.db_write()?;
-    let user = authenticated_user.user();
+        // need to check if current user matches user to be updated
+        if user.id != param_user_id {
+            return Err(bad_request("current user does not match requested user"));
+        }
 
-    // need to check if current user matches user to be updated
-    if &user.id.to_string() != param_user_id {
-        return Err(bad_request("current user does not match requested user"));
-    }
+        #[derive(Deserialize)]
+        struct UserUpdate {
+            user: User,
+        }
 
-    #[derive(Deserialize)]
-    struct UserUpdate {
-        user: User,
-    }
+        #[derive(Deserialize)]
+        struct User {
+            email: Option<String>,
+        }
 
-    #[derive(Deserialize)]
-    struct User {
-        email: Option<String>,
-    }
+        let user_update: UserUpdate =
+            serde_json::from_slice(req.body()).map_err(|_| bad_request("invalid json request"))?;
 
-    let user_update: UserUpdate =
-        serde_json::from_str(&body).map_err(|_| bad_request("invalid json request"))?;
-
-    let user_email = match &user_update.user.email {
-        Some(email) => email.trim(),
-        None => return Err(bad_request("empty email rejected")),
-    };
-
-    if user_email.is_empty() {
-        return Err(bad_request("empty email rejected"));
-    }
-
-    conn.transaction::<_, Box<dyn AppError>, _>(|| {
-        let new_email = NewEmail {
-            user_id: user.id,
-            email: user_email,
+        let user_email = match &user_update.user.email {
+            Some(email) => email.trim(),
+            None => return Err(bad_request("empty email rejected")),
         };
 
-        let token: String = insert_into(emails::table)
-            .values(&new_email)
-            .on_conflict(user_id)
-            .do_update()
-            .set(&new_email)
-            .returning(emails::token)
-            .get_result(&*conn)
-            .map_err(|_| server_error("Error in creating token"))?;
+        if user_email.is_empty() {
+            return Err(bad_request("empty email rejected"));
+        }
 
-        // This swallows any errors that occur while attempting to send the email. Some users have
-        // an invalid email set in their GitHub profile, and we should let them sign in even though
-        // we're trying to silently use their invalid address during signup and can't send them an
-        // email. They'll then have to provide a valid email address.
-        let _ = req
-            .app()
-            .emails
-            .send_user_confirm(user_email, &user.gh_login, &token);
+        conn.transaction::<_, BoxedAppError, _>(|conn| {
+            let new_email = NewEmail {
+                user_id: user.id,
+                email: user_email,
+            };
 
-        Ok(())
-    })?;
+            let token = insert_into(emails::table)
+                .values(&new_email)
+                .on_conflict(user_id)
+                .do_update()
+                .set(&new_email)
+                .returning(emails::token)
+                .get_result(conn)
+                .map(SecretString::new)
+                .map_err(|_| server_error("Error in creating token"))?;
 
-    ok_true()
+            // This swallows any errors that occur while attempting to send the email. Some users have
+            // an invalid email set in their GitHub profile, and we should let them sign in even though
+            // we're trying to silently use their invalid address during signup and can't send them an
+            // email. They'll then have to provide a valid email address.
+            let email = UserConfirmEmail {
+                user_name: &user.gh_login,
+                domain: &state.emails.domain,
+                token,
+            };
+
+            let _ = state.emails.send(user_email, email);
+
+            Ok(())
+        })?;
+
+        ok_true()
+    })
+    .await
 }
 
 /// Handles the `PUT /confirm/:email_token` route
-pub fn confirm_user_email(req: &mut dyn RequestExt) -> EndpointResult {
-    use diesel::update;
+pub async fn confirm_user_email(state: AppState, Path(token): Path<String>) -> AppResult<Response> {
+    spawn_blocking(move || {
+        use diesel::update;
 
-    let conn = req.db_write()?;
-    let req_token = &req.params()["email_token"];
+        let conn = &mut *state.db_write()?;
 
-    let updated_rows = update(emails::table.filter(emails::token.eq(req_token)))
-        .set(emails::verified.eq(true))
-        .execute(&*conn)?;
+        let updated_rows = update(emails::table.filter(emails::token.eq(&token)))
+            .set(emails::verified.eq(true))
+            .execute(conn)?;
 
-    if updated_rows == 0 {
-        return Err(bad_request("Email belonging to token not found."));
-    }
+        if updated_rows == 0 {
+            return Err(bad_request("Email belonging to token not found."));
+        }
 
-    ok_true()
+        ok_true()
+    })
+    .await
 }
 
 /// Handles `PUT /user/:user_id/resend` route
-pub fn regenerate_token_and_send(req: &mut dyn RequestExt) -> EndpointResult {
-    use diesel::dsl::sql;
-    use diesel::update;
+pub async fn regenerate_token_and_send(
+    state: AppState,
+    Path(param_user_id): Path<i32>,
+    req: Parts,
+) -> AppResult<Response> {
+    spawn_blocking(move || {
+        use diesel::dsl::sql;
+        use diesel::update;
 
-    let param_user_id = req.params()["user_id"]
-        .parse::<i32>()
-        .map_err(|err| err.chain(bad_request("invalid user_id")))?;
-    let authenticated_user = req.authenticate()?;
-    let conn = req.db_write()?;
-    let user = authenticated_user.user();
+        let conn = &mut state.db_write()?;
 
-    // need to check if current user matches user to be updated
-    if user.id != param_user_id {
-        return Err(bad_request("current user does not match requested user"));
-    }
+        let auth = AuthCheck::default().check(&req, conn)?;
+        let user = auth.user();
 
-    conn.transaction(|| {
-        let email: Email = update(Email::belonging_to(&user))
-            .set(emails::token.eq(sql("DEFAULT")))
-            .get_result(&*conn)
-            .map_err(|_| bad_request("Email could not be found"))?;
+        // need to check if current user matches user to be updated
+        if user.id != param_user_id {
+            return Err(bad_request("current user does not match requested user"));
+        }
 
-        req.app()
-            .emails
-            .send_user_confirm(&email.email, &user.gh_login, &email.token)
-    })?;
+        conn.transaction(|conn| -> AppResult<_> {
+            let email: Email = update(Email::belonging_to(user))
+                .set(emails::token.eq(sql("DEFAULT")))
+                .get_result(conn)
+                .optional()?
+                .ok_or_else(|| bad_request("Email could not be found"))?;
 
-    ok_true()
+            let email1 = UserConfirmEmail {
+                user_name: &user.gh_login,
+                domain: &state.emails.domain,
+                token: email.token,
+            };
+
+            state.emails.send(&email.email, email1).map_err(Into::into)
+        })?;
+
+        ok_true()
+    })
+    .await
 }
 
 /// Handles `PUT /me/email_notifications` route
-pub fn update_email_notifications(req: &mut dyn RequestExt) -> EndpointResult {
-    use self::crate_owners::dsl::*;
-    use diesel::pg::upsert::excluded;
+pub async fn update_email_notifications(app: AppState, req: BytesRequest) -> AppResult<Response> {
+    spawn_blocking(move || {
+        use diesel::pg::upsert::excluded;
 
-    #[derive(Deserialize)]
-    struct CrateEmailNotifications {
-        id: i32,
-        email_notifications: bool,
-    }
+        #[derive(Deserialize)]
+        struct CrateEmailNotifications {
+            id: i32,
+            email_notifications: bool,
+        }
 
-    let mut body = String::new();
-    req.body().read_to_string(&mut body)?;
-    let updates: HashMap<i32, bool> = serde_json::from_str::<Vec<CrateEmailNotifications>>(&body)
-        .map_err(|_| bad_request("invalid json request"))?
-        .iter()
-        .map(|c| (c.id, c.email_notifications))
-        .collect();
+        let updates: HashMap<i32, bool> =
+            serde_json::from_slice::<Vec<CrateEmailNotifications>>(req.body())
+                .map_err(|_| bad_request("invalid json request"))?
+                .iter()
+                .map(|c| (c.id, c.email_notifications))
+                .collect();
 
-    let user_id = req.authenticate()?.user_id();
-    let conn = req.db_write()?;
+        let conn = &mut *app.db_write()?;
+        let user_id = AuthCheck::default().check(&req, conn)?.user_id();
 
-    // Build inserts from existing crates belonging to the current user
-    let to_insert = CrateOwner::by_owner_kind(OwnerKind::User)
-        .filter(owner_id.eq(user_id))
-        .select((crate_id, owner_id, owner_kind, email_notifications))
-        .load(&*conn)?
-        .into_iter()
-        // Remove records whose `email_notifications` will not change from their current value
-        .map(
-            |(c_id, o_id, o_kind, e_notifications): (i32, i32, i32, bool)| {
-                let current_e_notifications = *updates.get(&c_id).unwrap_or(&e_notifications);
-                (
-                    crate_id.eq(c_id),
-                    owner_id.eq(o_id),
-                    owner_kind.eq(o_kind),
-                    email_notifications.eq(current_e_notifications),
-                )
-            },
+        // Build inserts from existing crates belonging to the current user
+        let to_insert = CrateOwner::by_owner_kind(OwnerKind::User)
+            .filter(crate_owners::owner_id.eq(user_id))
+            .select((
+                crate_owners::crate_id,
+                crate_owners::owner_id,
+                crate_owners::owner_kind,
+                crate_owners::email_notifications,
+            ))
+            .load(conn)?
+            .into_iter()
+            // Remove records whose `email_notifications` will not change from their current value
+            .map(
+                |(c_id, o_id, o_kind, e_notifications): (i32, i32, i32, bool)| {
+                    let current_e_notifications = *updates.get(&c_id).unwrap_or(&e_notifications);
+                    (
+                        crate_owners::crate_id.eq(c_id),
+                        crate_owners::owner_id.eq(o_id),
+                        crate_owners::owner_kind.eq(o_kind),
+                        crate_owners::email_notifications.eq(current_e_notifications),
+                    )
+                },
+            )
+            .collect::<Vec<_>>();
+
+        // Upsert crate owners; this should only actually exectute updates
+        diesel::insert_into(crate_owners::table)
+            .values(&to_insert)
+            .on_conflict((
+                crate_owners::crate_id,
+                crate_owners::owner_id,
+                crate_owners::owner_kind,
+            ))
+            .do_update()
+            .set(crate_owners::email_notifications.eq(excluded(crate_owners::email_notifications)))
+            .execute(conn)?;
+
+        ok_true()
+    })
+    .await
+}
+
+pub struct UserConfirmEmail<'a> {
+    pub user_name: &'a str,
+    pub domain: &'a str,
+    pub token: SecretString,
+}
+
+impl crate::email::Email for UserConfirmEmail<'_> {
+    const SUBJECT: &'static str = "Please confirm your email address";
+
+    fn body(&self) -> String {
+        // Create a URL with token string as path to send to user
+        // If user clicks on path, look email/user up in database,
+        // make sure tokens match
+
+        format!(
+            "Hello {user_name}! Welcome to crates.io. Please click the
+link below to verify your email address. Thank you!\n
+https://{domain}/confirm/{token}",
+            user_name = self.user_name,
+            domain = self.domain,
+            token = self.token.expose_secret(),
         )
-        .collect::<Vec<_>>();
-
-    // Upsert crate owners; this should only actually exectute updates
-    diesel::insert_into(crate_owners)
-        .values(&to_insert)
-        .on_conflict((crate_id, owner_id, owner_kind))
-        .do_update()
-        .set(email_notifications.eq(excluded(email_notifications)))
-        .execute(&*conn)?;
-
-    ok_true()
+    }
 }

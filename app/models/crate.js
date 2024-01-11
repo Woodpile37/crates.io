@@ -1,6 +1,7 @@
 import Model, { attr, hasMany } from '@ember-data/model';
+import { waitForPromise } from '@ember/test-waiters';
 
-import { customAction } from '../utils/custom-action';
+import { apiAction } from '@mainmatter/ember-api-actions';
 
 export default class Crate extends Model {
   @attr name;
@@ -17,14 +18,13 @@ export default class Crate extends Model {
   @attr documentation;
   @attr repository;
 
-  @hasMany('versions', { async: true }) versions;
-
-  @hasMany('teams', { async: true }) owner_team;
-  @hasMany('users', { async: true }) owner_user;
-  @hasMany('version-download', { async: true }) version_downloads;
-  @hasMany('keywords', { async: true }) keywords;
-  @hasMany('categories', { async: true }) categories;
-  @hasMany('dependency', { async: true }) reverse_dependencies;
+  @hasMany('version', { async: true, inverse: 'crate' }) versions;
+  @hasMany('team', { async: true, inverse: null }) owner_team;
+  @hasMany('user', { async: true, inverse: null }) owner_user;
+  @hasMany('version-download', { async: true, inverse: null }) version_downloads;
+  @hasMany('keyword', { async: true, inverse: null }) keywords;
+  @hasMany('category', { async: true, inverse: null }) categories;
+  @hasMany('dependency', { async: true, inverse: null }) reverse_dependencies;
 
   /**
    * This is the default version that will be shown when visiting the crate
@@ -48,15 +48,17 @@ export default class Crate extends Model {
   }
 
   async follow() {
-    return await customAction(this, { method: 'PUT', path: 'follow' });
+    return await waitForPromise(apiAction(this, { method: 'PUT', path: 'follow' }));
   }
 
   async unfollow() {
-    return await customAction(this, { method: 'DELETE', path: 'follow' });
+    return await waitForPromise(apiAction(this, { method: 'DELETE', path: 'follow' }));
   }
 
   async inviteOwner(username) {
-    let response = await customAction(this, { method: 'PUT', path: 'owners', data: { owners: [username] } });
+    let response = await waitForPromise(
+      apiAction(this, { method: 'PUT', path: 'owners', data: { owners: [username] } }),
+    );
     if (response.ok) {
       return response;
     } else {
@@ -65,7 +67,9 @@ export default class Crate extends Model {
   }
 
   async removeOwner(username) {
-    let response = await customAction(this, { method: 'DELETE', path: 'owners', data: { owners: [username] } });
+    let response = await waitForPromise(
+      apiAction(this, { method: 'DELETE', path: 'owners', data: { owners: [username] } }),
+    );
     if (response.ok) {
       return response;
     } else {

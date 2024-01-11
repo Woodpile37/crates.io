@@ -1,4 +1,4 @@
-use cargo_registry::{
+use crates_io::{
     models::{Crate, NewVersion, Version},
     schema::{dependencies, versions},
     util::errors::AppResult,
@@ -14,12 +14,12 @@ pub struct VersionBuilder<'a> {
     dependencies: Vec<(i32, Option<&'static str>)>,
     features: BTreeMap<String, Vec<String>>,
     license: Option<&'a str>,
-    license_file: Option<&'a str>,
     num: semver::Version,
     size: i32,
     yanked: bool,
     checksum: String,
     links: Option<String>,
+    rust_version: Option<String>,
 }
 
 impl<'a> VersionBuilder<'a> {
@@ -31,7 +31,7 @@ impl<'a> VersionBuilder<'a> {
     #[track_caller]
     pub fn new(num: &str) -> Self {
         let num = semver::Version::parse(num).unwrap_or_else(|e| {
-            panic!("The version {} is not valid: {}", num, e);
+            panic!("The version {num} is not valid: {e}");
         });
 
         VersionBuilder {
@@ -39,12 +39,12 @@ impl<'a> VersionBuilder<'a> {
             dependencies: Vec::new(),
             features: BTreeMap::new(),
             license: None,
-            license_file: None,
             num,
             size: 0,
             yanked: false,
             checksum: String::new(),
             links: None,
+            rust_version: None,
         }
     }
 
@@ -83,11 +83,17 @@ impl<'a> VersionBuilder<'a> {
         self
     }
 
+    /// Sets the version's `rust_version` value.
+    pub fn rust_version(mut self, rust_version: &str) -> Self {
+        self.rust_version = Some(rust_version.to_owned());
+        self
+    }
+
     pub fn build(
         self,
         crate_id: i32,
         published_by: i32,
-        connection: &PgConnection,
+        connection: &mut PgConnection,
     ) -> AppResult<Version> {
         use diesel::{insert_into, update};
 
@@ -98,11 +104,11 @@ impl<'a> VersionBuilder<'a> {
             &self.num,
             &self.features,
             license,
-            self.license_file,
             self.size,
             published_by,
             self.checksum,
             self.links,
+            self.rust_version,
         )?
         .save(connection, "someone@example.com")?;
 
@@ -150,11 +156,11 @@ impl<'a> VersionBuilder<'a> {
         self,
         crate_id: i32,
         published_by: i32,
-        connection: &PgConnection,
+        connection: &mut PgConnection,
     ) -> Version {
         self.build(crate_id, published_by, connection)
             .unwrap_or_else(|e| {
-                panic!("Unable to create version: {:?}", e);
+                panic!("Unable to create version: {e:?}");
             })
     }
 }

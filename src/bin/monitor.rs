@@ -4,18 +4,19 @@
 //! Usage:
 //!     cargo run --bin monitor
 
-#![warn(clippy::all, rust_2018_idioms)]
-
 use anyhow::Result;
-use cargo_registry::{admin::on_call, db, schema::*};
+use crates_io::worker::jobs;
+use crates_io::{admin::on_call, db, schema::*};
+use crates_io_env_vars::{var, var_parsed};
+use crates_io_worker::BackgroundJob;
 use diesel::prelude::*;
 
 fn main() -> Result<()> {
-    let conn = db::oneoff_connection()?;
+    let conn = &mut db::oneoff_connection()?;
 
-    check_failing_background_jobs(&conn)?;
-    check_stalled_update_downloads(&conn)?;
-    check_spam_attack(&conn)?;
+    check_failing_background_jobs(conn)?;
+    check_stalled_update_downloads(conn)?;
+    check_spam_attack(conn)?;
     Ok(())
 }
 
@@ -27,8 +28,7 @@ fn main() -> Result<()> {
 ///
 /// Within the default 15 minute time, a job should have already had several
 /// failed retry attempts.
-fn check_failing_background_jobs(conn: &PgConnection) -> Result<()> {
-    use cargo_registry::schema::background_jobs::dsl::*;
+fn check_failing_background_jobs(conn: &mut PgConnection) -> Result<()> {
     use diesel::dsl::*;
     use diesel::sql_types::Integer;
 
@@ -37,13 +37,12 @@ fn check_failing_background_jobs(conn: &PgConnection) -> Result<()> {
     println!("Checking for failed background jobs");
 
     // Max job execution time in minutes
-    let max_job_time = dotenv::var("MAX_JOB_TIME")
-        .map(|s| s.parse::<i32>().unwrap())
-        .unwrap_or(15);
+    let max_job_time = var_parsed("MAX_JOB_TIME")?.unwrap_or(15);
 
-    let stalled_jobs: Vec<i32> = background_jobs
+    let stalled_jobs: Vec<i32> = background_jobs::table
         .select(1.into_sql::<Integer>())
-        .filter(created_at.lt(now - max_job_time.minutes()))
+        .filter(background_jobs::created_at.lt(now - max_job_time.minutes()))
+        .filter(background_jobs::priority.ge(0))
         .for_update()
         .skip_locked()
         .load(conn)?;
@@ -69,8 +68,7 @@ fn check_failing_background_jobs(conn: &PgConnection) -> Result<()> {
 }
 
 /// Check for an `update_downloads` job that has run longer than expected
-fn check_stalled_update_downloads(conn: &PgConnection) -> Result<()> {
-    use cargo_registry::schema::background_jobs::dsl::*;
+fn check_stalled_update_downloads(conn: &mut PgConnection) -> Result<()> {
     use chrono::{DateTime, NaiveDateTime, Utc};
 
     const EVENT_KEY: &str = "update_downloads_stalled";
@@ -78,17 +76,15 @@ fn check_stalled_update_downloads(conn: &PgConnection) -> Result<()> {
     println!("Checking for stalled background jobs");
 
     // Max job execution time in minutes
-    let max_job_time = dotenv::var("MONITOR_MAX_UPDATE_DOWNLOADS_TIME")
-        .map(|s| s.parse::<u32>().unwrap() as i64)
-        .unwrap_or(120);
+    let max_job_time = var_parsed("MONITOR_MAX_UPDATE_DOWNLOADS_TIME")?.unwrap_or(120);
 
-    let start_time: Result<NaiveDateTime, _> = background_jobs
-        .filter(job_type.eq("update_downloads"))
-        .select(created_at)
+    let start_time: Result<NaiveDateTime, _> = background_jobs::table
+        .filter(background_jobs::job_type.eq(jobs::UpdateDownloads::JOB_NAME))
+        .select(background_jobs::created_at)
         .first(conn);
 
     if let Ok(start_time) = start_time {
-        let start_time = DateTime::<Utc>::from_utc(start_time, Utc);
+        let start_time = DateTime::<Utc>::from_naive_utc_and_offset(start_time, Utc);
         let minutes = Utc::now().signed_duration_since(start_time).num_minutes();
 
         if minutes > max_job_time {
@@ -106,15 +102,14 @@ fn check_stalled_update_downloads(conn: &PgConnection) -> Result<()> {
 }
 
 /// Check for known spam patterns
-fn check_spam_attack(conn: &PgConnection) -> Result<()> {
-    use cargo_registry::sql::canon_crate_name;
-    use diesel::dsl::*;
+fn check_spam_attack(conn: &mut PgConnection) -> Result<()> {
+    use crates_io::sql::canon_crate_name;
 
     const EVENT_KEY: &str = "spam_attack";
 
     println!("Checking for crates indicating someone is spamming us");
 
-    let bad_crate_names = dotenv::var("SPAM_CRATE_NAMES");
+    let bad_crate_names = var("SPAM_CRATE_NAMES")?;
     let bad_crate_names: Vec<_> = bad_crate_names
         .as_ref()
         .map(|s| s.split(',').collect())
@@ -123,7 +118,7 @@ fn check_spam_attack(conn: &PgConnection) -> Result<()> {
     let mut event_description = None;
 
     let bad_crate: Option<String> = crates::table
-        .filter(canon_crate_name(crates::name).eq(any(bad_crate_names)))
+        .filter(canon_crate_name(crates::name).eq_any(bad_crate_names))
         .select(crates::name)
         .first(conn)
         .optional()?;

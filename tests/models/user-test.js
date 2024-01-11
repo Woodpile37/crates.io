@@ -1,6 +1,6 @@
 import { module, test } from 'qunit';
 
-import { setupTest } from 'cargo/tests/helpers';
+import { setupTest } from 'crates-io/tests/helpers';
 
 import setupMirage from '../helpers/setup-mirage';
 
@@ -19,14 +19,14 @@ module('Model | User', function (hooks) {
       this.authenticateAs(user);
 
       let { currentUser } = await this.owner.lookup('service:session').loadUserTask.perform();
-      assert.equal(currentUser.email, 'old@email.com');
-      assert.equal(currentUser.email_verified, true);
-      assert.equal(currentUser.email_verification_sent, true);
+      assert.strictEqual(currentUser.email, 'old@email.com');
+      assert.true(currentUser.email_verified);
+      assert.true(currentUser.email_verification_sent);
 
       await currentUser.changeEmail('new@email.com');
-      assert.equal(currentUser.email, 'new@email.com');
-      assert.equal(currentUser.email_verified, false);
-      assert.equal(currentUser.email_verification_sent, true);
+      assert.strictEqual(currentUser.email, 'new@email.com');
+      assert.false(currentUser.email_verified);
+      assert.true(currentUser.email_verification_sent);
     });
 
     test('error handling', async function (assert) {
@@ -41,7 +41,7 @@ module('Model | User', function (hooks) {
       await assert.rejects(currentUser.changeEmail('new@email.com'), function (error) {
         assert.deepEqual(error.errors, [
           {
-            detail: '[object Object]',
+            detail: '{}',
             status: '500',
             title: 'The backend responded with an error',
           },
@@ -74,7 +74,7 @@ module('Model | User', function (hooks) {
       await assert.rejects(currentUser.resendVerificationEmail(), function (error) {
         assert.deepEqual(error.errors, [
           {
-            detail: '[object Object]',
+            detail: '{}',
             status: '500',
             title: 'The backend responded with an error',
           },

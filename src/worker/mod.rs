@@ -1,17 +1,33 @@
-//! The `worker` module contains all the tasks that can be queued up for the
-//! background worker process to work on. This includes recurring tasks like
-//! the daily database maintenance, but also operations like rendering READMEs
-//! and uploading them to S3.
+//! This module contains the code for the background jobs that run on the
+//! crates.io backend servers.
+//!
+//! The `swirl` submodule contains the code for the generic background job
+//! runner, and the `jobs` submodule contains the application-specific
+//! background job definitions.
 
-pub mod cloudfront;
-mod daily_db_maintenance;
-pub mod dump_db;
-mod git;
-mod readmes;
-mod update_downloads;
+use crates_io_worker::Runner;
+use std::sync::Arc;
 
-pub use daily_db_maintenance::daily_db_maintenance;
-pub use dump_db::dump_db;
-pub use git::{add_crate, squash_index, sync_yanked};
-pub use readmes::render_and_upload_readme;
-pub use update_downloads::update_downloads;
+mod environment;
+pub mod jobs;
+
+pub use self::environment::Environment;
+
+pub trait RunnerExt {
+    fn register_crates_io_job_types(self) -> Self;
+}
+
+impl RunnerExt for Runner<Arc<Environment>> {
+    fn register_crates_io_job_types(self) -> Self {
+        self.register_job_type::<jobs::CheckTyposquat>()
+            .register_job_type::<jobs::DailyDbMaintenance>()
+            .register_job_type::<jobs::DumpDb>()
+            .register_job_type::<jobs::NormalizeIndex>()
+            .register_job_type::<jobs::RenderAndUploadReadme>()
+            .register_job_type::<jobs::SquashIndex>()
+            .register_job_type::<jobs::SyncAdmins>()
+            .register_job_type::<jobs::SyncToGitIndex>()
+            .register_job_type::<jobs::SyncToSparseIndex>()
+            .register_job_type::<jobs::UpdateDownloads>()
+    }
+}

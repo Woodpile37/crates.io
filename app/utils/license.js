@@ -562,9 +562,9 @@ const LICENSE_KEYWORDS = new Set(['OR', 'AND', 'WITH', '(', ')']);
 export function parseLicense(text) {
   return text
     .trim()
-    .replace('/', ' OR ')
-    .replace(/(^\(| \()/, ' ( ')
-    .replace(/(\)$|\) )/, ' ) ')
+    .replace(/\//g, ' OR ')
+    .replace(/(^\(| \()/g, ' ( ')
+    .replace(/(\)$|\) )/g, ' ) ')
     .replace(/ +/g, ' ')
     .split(' ')
     .filter(Boolean)
@@ -583,13 +583,11 @@ function licenseLink(text) {
     return `https://choosealicense.com/licenses/${calLicense}`;
   }
 
-  let spdxLicense = SPDX_LICENSES.find(it => it.toLowerCase() === lowerCaseText);
-  if (spdxLicense) {
-    return `https://spdx.org/licenses/${spdxLicense}.html`;
-  }
+  let spdxMatch =
+    SPDX_LICENSES.find(it => it.toLowerCase() === lowerCaseText) ||
+    SPDX_EXCEPTIONS.find(it => it.toLowerCase() === lowerCaseText);
 
-  let spdxException = SPDX_EXCEPTIONS.find(it => it.toLowerCase() === lowerCaseText);
-  if (spdxException) {
-    return `https://spdx.org/licenses/${spdxException}.html`;
+  if (spdxMatch) {
+    return `https://spdx.org/licenses/${spdxMatch}.html`;
   }
 }

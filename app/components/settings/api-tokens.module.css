@@ -35,17 +35,21 @@
 }
 
 .name {
-    margin: 0 0 12px;
+    margin: 0 0 var(--space-s);
     font-weight: 500;
 }
 
-.dates {
+.scopes,
+.metadata {
+    composes: small from '../../styles/shared/typography.module.css';
+
+    > * + * {
+        margin-top: var(--space-3xs);
+    }
 }
 
-.created-at,
-.last-used-at {
-    composes: small from '../../styles/shared/typography.module.css';
-    margin-top: 4px;
+.scopes {
+    margin-bottom: var(--space-xs);
 }
 
 .new-token-form {
@@ -151,7 +155,11 @@
     border-radius: 4px;
 }
 
-@media (--min-s) {
+.expired {
+    opacity: 0.6;
+}
+
+@media (min-width: 640px) {
     .new-token-form {
         display: grid;
         grid-template-columns: 1fr auto;
@@ -168,10 +176,18 @@
         display: grid;
         grid-template:
             "name actions" auto
-            "last-user actions" auto
-            "created-at actions" auto
+            "scopes actions" auto
+            "metadata actions" auto
             "details details" auto
             / 1fr auto;
+
+        .scopes {
+            grid-area: scopes;
+        }
+
+        .metadata {
+            grid-area: metadata;
+        }
 
         .actions {
             grid-area: actions;

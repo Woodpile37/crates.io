@@ -1,8 +1,9 @@
-use cargo_registry::github::{
-    GitHubClient, GitHubOrgMembership, GitHubOrganization, GitHubTeam, GitHubTeamMembership,
-    GithubUser,
+use anyhow::anyhow;
+use async_trait::async_trait;
+use crates_io_github::{
+    GitHubClient, GitHubError, GitHubOrgMembership, GitHubOrganization, GitHubPublicKey,
+    GitHubTeam, GitHubTeamMembership, GithubUser,
 };
-use cargo_registry::util::errors::{not_found, AppResult};
 use oauth2::AccessToken;
 
 pub(crate) const MOCK_GITHUB_DATA: MockData = MockData {
@@ -43,6 +44,14 @@ pub(crate) const MOCK_GITHUB_DATA: MockData = MockData {
             email: "owner@example.com",
         },
     ],
+    // Test key from https://docs.github.com/en/developers/overview/secret-scanning-partner-program#create-a-secret-alert-service
+    public_keys: &[
+        MockPublicKey {
+            key_identifier: "f9525bf080f75b3506ca1ead061add62b8633a346606dc5fe544e29231c6ee0d",
+            key: "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEsz9ugWDj5jK5ELBK42ynytbo38gP\nHzZFI03Exwz8Lh/tCfL3YxwMdLjB+bMznsanlhK0RwcGP3IDb34kQDIo3Q==\n-----END PUBLIC KEY-----",
+            is_current: true,
+        },
+    ],
 };
 
 pub(crate) struct MockGitHubClient {
@@ -55,8 +64,9 @@ impl MockGitHubClient {
     }
 }
 
+#[async_trait]
 impl GitHubClient for MockGitHubClient {
-    fn current_user(&self, _auth: &AccessToken) -> AppResult<GithubUser> {
+    async fn current_user(&self, _auth: &AccessToken) -> Result<GithubUser, GitHubError> {
         let user = &self.data.users[0];
         Ok(GithubUser {
             id: user.id,
@@ -67,7 +77,11 @@ impl GitHubClient for MockGitHubClient {
         })
     }
 
-    fn org_by_name(&self, org_name: &str, _auth: &AccessToken) -> AppResult<GitHubOrganization> {
+    async fn org_by_name(
+        &self,
+        org_name: &str,
+        _auth: &AccessToken,
+    ) -> Result<GitHubOrganization, GitHubError> {
         let org = self
             .data
             .orgs
@@ -80,12 +94,12 @@ impl GitHubClient for MockGitHubClient {
         })
     }
 
-    fn team_by_name(
+    async fn team_by_name(
         &self,
         org_name: &str,
         team_name: &str,
         auth: &AccessToken,
-    ) -> AppResult<GitHubTeam> {
+    ) -> Result<GitHubTeam, GitHubError> {
         let team = self
             .data
             .orgs
@@ -99,17 +113,17 @@ impl GitHubClient for MockGitHubClient {
         Ok(GitHubTeam {
             id: team.id,
             name: Some(team.name.into()),
-            organization: self.org_by_name(org_name, auth)?,
+            organization: self.org_by_name(org_name, auth).await?,
         })
     }
 
-    fn team_membership(
+    async fn team_membership(
         &self,
         org_id: i32,
         team_id: i32,
         username: &str,
         _auth: &AccessToken,
-    ) -> AppResult<GitHubTeamMembership> {
+    ) -> Result<GitHubTeamMembership, GitHubError> {
         let team = self
             .data
             .orgs
@@ -129,12 +143,12 @@ impl GitHubClient for MockGitHubClient {
         }
     }
 
-    fn org_membership(
+    async fn org_membership(
         &self,
         org_id: i32,
         username: &str,
         _auth: &AccessToken,
-    ) -> AppResult<GitHubOrgMembership> {
+    ) -> Result<GitHubOrgMembership, GitHubError> {
         let org = self
             .data
             .orgs
@@ -159,11 +173,24 @@ impl GitHubClient for MockGitHubClient {
             Err(not_found())
         }
     }
+
+    async fn public_keys(
+        &self,
+        _username: &str,
+        _password: &str,
+    ) -> Result<Vec<GitHubPublicKey>, GitHubError> {
+        Ok(self.data.public_keys.iter().map(Into::into).collect())
+    }
+}
+
+fn not_found() -> GitHubError {
+    GitHubError::NotFound(anyhow!("404"))
 }
 
 pub(crate) struct MockData {
     orgs: &'static [MockOrg],
     users: &'static [MockUser],
+    public_keys: &'static [MockPublicKey],
 }
 
 struct MockUser {
@@ -184,4 +211,20 @@ struct MockTeam {
     id: i32,
     name: &'static str,
     members: &'static [&'static str],
+}
+
+struct MockPublicKey {
+    key_identifier: &'static str,
+    key: &'static str,
+    is_current: bool,
+}
+
+impl From<&'static MockPublicKey> for GitHubPublicKey {
+    fn from(k: &'static MockPublicKey) -> Self {
+        Self {
+            key_identifier: k.key_identifier.to_string(),
+            key: k.key.to_string(),
+            is_current: k.is_current,
+        }
+    }
 }

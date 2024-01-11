@@ -3,6 +3,18 @@
     <span data-test-crate-name>{{@crate.name}}</span>
     {{#if @version}}
       <small data-test-crate-version>v{{@version.num}}</small>
+
+      {{#if @version.yanked}}
+        <span local-class="yanked-badge" data-test-yanked>
+          {{svg-jar "trash"}}
+          Yanked
+
+          <EmberTooltip>
+            This crate has been yanked, but it is still available for download for other crates that
+            may be depending on it.
+          </EmberTooltip>
+        </span>
+      {{/if}}
     {{/if}}
   </h1>
 
@@ -42,7 +54,7 @@
   </nav.Tab>
 
   <nav.Tab @link={{link "crate.versions" @crate}} data-test-versions-tab>
-    {{@crate.versions.length}} Versions
+    {{pluralize @crate.versions.length "Version"}}
   </nav.Tab>
 
   <nav.Tab

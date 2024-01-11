@@ -5,20 +5,23 @@ use crate::app::App;
 use crate::util::errors::{cargo_err, AppResult};
 
 use crate::models::{Crate, Team, User};
-use crate::schema::{crate_owners, users};
-use crate::sql::lower;
+use crate::schema::crate_owners;
+use crate::sql::pg_enum;
 
 #[derive(Insertable, Associations, Identifiable, Debug, Clone, Copy)]
-#[belongs_to(Crate)]
-#[belongs_to(User, foreign_key = "owner_id")]
-#[belongs_to(Team, foreign_key = "owner_id")]
-#[table_name = "crate_owners"]
-#[primary_key(crate_id, owner_id, owner_kind)]
+#[diesel(
+    table_name = crate_owners,
+    check_for_backend(diesel::pg::Pg),
+    primary_key(crate_id, owner_id, owner_kind),
+    belongs_to(Crate),
+    belongs_to(User, foreign_key = owner_id),
+    belongs_to(Team, foreign_key = owner_id),
+)]
 pub struct CrateOwner {
     pub crate_id: i32,
     pub owner_id: i32,
     pub created_by: i32,
-    pub owner_kind: i32,
+    pub owner_kind: OwnerKind,
     pub email_notifications: bool,
 }
 
@@ -28,20 +31,18 @@ impl CrateOwner {
     /// Returns a base crate owner query filtered by the owner kind argument. This query also
     /// filters out deleted records.
     pub fn by_owner_kind(kind: OwnerKind) -> BoxedQuery<'static> {
-        use self::crate_owners::dsl::*;
-
-        crate_owners
-            .filter(deleted.eq(false))
-            .filter(owner_kind.eq(kind as i32))
+        crate_owners::table
+            .filter(crate_owners::deleted.eq(false))
+            .filter(crate_owners::owner_kind.eq(kind))
             .into_boxed()
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-#[repr(u32)]
-pub enum OwnerKind {
-    User = 0,
-    Team = 1,
+pg_enum! {
+    pub enum OwnerKind {
+        User = 0,
+        Team = 1,
+    }
 }
 
 /// Unifies the notion of a User or a Team.
@@ -56,11 +57,12 @@ impl Owner {
     /// up-to-date GitHub ID. Fails out if the user isn't found in the
     /// database, the team isn't found on GitHub, or if the user isn't a member
     /// of the team on GitHub.
+    ///
     /// May be a user's GH login or a full team name. This is case
     /// sensitive.
     pub fn find_or_create_by_login(
         app: &App,
-        conn: &PgConnection,
+        conn: &mut PgConnection,
         req_user: &User,
         name: &str,
     ) -> AppResult<Owner> {
@@ -69,34 +71,51 @@ impl Owner {
                 app, conn, name, req_user,
             )?))
         } else {
-            users::table
-                .filter(lower(users::gh_login).eq(name.to_lowercase()))
-                .filter(users::gh_id.ne(-1))
-                .order(users::gh_id.desc())
-                .first(conn)
+            User::find_by_login(conn, name)
+                .optional()?
                 .map(Owner::User)
-                .map_err(|_| cargo_err(&format_args!("could not find user with login `{}`", name)))
+                .ok_or_else(|| cargo_err(format_args!("could not find user with login `{name}`")))
+        }
+    }
+
+    /// Finds the owner by name. Never recreates a team, to ensure that
+    /// organizations that were deleted after they were added can still be
+    /// removed.
+    ///
+    /// May be a user's GH login or a full team name. This is case
+    /// sensitive.
+    pub fn find_by_login(conn: &mut PgConnection, name: &str) -> AppResult<Owner> {
+        if name.contains(':') {
+            Team::find_by_login(conn, name)
+                .optional()?
+                .map(Owner::Team)
+                .ok_or_else(|| cargo_err(format_args!("could not find team with login `{name}`")))
+        } else {
+            User::find_by_login(conn, name)
+                .optional()?
+                .map(Owner::User)
+                .ok_or_else(|| cargo_err(format_args!("could not find user with login `{name}`")))
         }
     }
 
     pub fn kind(&self) -> i32 {
-        match *self {
+        match self {
             Owner::User(_) => OwnerKind::User as i32,
             Owner::Team(_) => OwnerKind::Team as i32,
         }
     }
 
     pub fn login(&self) -> &str {
-        match *self {
-            Owner::User(ref user) => &user.gh_login,
-            Owner::Team(ref team) => &team.login,
+        match self {
+            Owner::User(user) => &user.gh_login,
+            Owner::Team(team) => &team.login,
         }
     }
 
     pub fn id(&self) -> i32 {
-        match *self {
-            Owner::User(ref user) => user.id,
-            Owner::Team(ref team) => team.id,
+        match self {
+            Owner::User(user) => user.id,
+            Owner::Team(team) => team.id,
         }
     }
 }

@@ -1,119 +1,119 @@
 use crate::builders::CrateBuilder;
 use crate::util::{RequestHelper, TestApp};
-use crate::OkBool;
+use googletest::prelude::*;
+use http::StatusCode;
+use insta::assert_display_snapshot;
 
-#[test]
-fn diesel_not_found_results_in_404() {
-    let (_, _, user) = TestApp::init().with_user();
+fn assert_is_following(crate_name: &str, expected: bool, user: &impl RequestHelper) {
+    let response = user.get::<()>(&format!("/api/v1/crates/{crate_name}/following"));
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.json(), json!({ "following": expected }));
+}
 
-    user.get("/api/v1/crates/foo_following/following")
-        .assert_not_found();
+fn follow(crate_name: &str, user: &impl RequestHelper) {
+    let response = user.put::<()>(&format!("/api/v1/crates/{crate_name}/follow"), b"" as &[u8]);
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.json(), json!({ "ok": true }));
+}
+
+fn unfollow(crate_name: &str, user: &impl RequestHelper) {
+    let response = user.delete::<()>(&format!("/api/v1/crates/{crate_name}/follow"));
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.json(), json!({ "ok": true }));
 }
 
 #[test]
-fn following() {
-    // TODO: Test anon requests as well?
+fn test_unauthenticated_requests() {
+    const CRATE_NAME: &str = "foo";
+
+    let (app, anon, user) = TestApp::init().with_user();
+
+    app.db(|conn| {
+        CrateBuilder::new(CRATE_NAME, user.as_model().id).expect_build(conn);
+    });
+
+    let response = anon.get::<()>(&format!("/api/v1/crates/{CRATE_NAME}/following"));
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_display_snapshot!(response.text(), @r###"{"errors":[{"detail":"must be logged in to perform that action"}]}"###);
+
+    let response = anon.put::<()>(&format!("/api/v1/crates/{CRATE_NAME}/follow"), b"" as &[u8]);
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_display_snapshot!(response.text(), @r###"{"errors":[{"detail":"must be logged in to perform that action"}]}"###);
+
+    let response = anon.delete::<()>(&format!("/api/v1/crates/{CRATE_NAME}/follow"));
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_display_snapshot!(response.text(), @r###"{"errors":[{"detail":"must be logged in to perform that action"}]}"###);
+}
+
+#[test]
+fn test_following() {
+    const CRATE_NAME: &str = "foo_following";
+
     let (app, _, user) = TestApp::init().with_user();
 
     app.db(|conn| {
-        CrateBuilder::new("foo_following", user.as_model().id).expect_build(conn);
+        CrateBuilder::new(CRATE_NAME, user.as_model().id).expect_build(conn);
     });
 
-    let is_following = || -> bool {
-        #[derive(Deserialize)]
-        struct F {
-            following: bool,
-        }
+    // Check that initially we are not following the crate yet.
+    assert_is_following(CRATE_NAME, false, &user);
 
-        user.get::<F>("/api/v1/crates/foo_following/following")
-            .good()
-            .following
-    };
+    // Follow the crate and check that we are now following it.
+    follow(CRATE_NAME, &user);
+    assert_is_following(CRATE_NAME, true, &user);
+    assert_that!(user.search("following=1").crates, len(eq(1)));
 
-    let follow = || {
-        assert!(
-            user.put::<OkBool>("/api/v1/crates/foo_following/follow", b"")
-                .good()
-                .ok
-        );
-    };
+    // Follow the crate again and check that we are still following it
+    // (aka. the request is idempotent).
+    follow(CRATE_NAME, &user);
+    assert_is_following(CRATE_NAME, true, &user);
 
-    let unfollow = || {
-        assert!(
-            user.delete::<OkBool>("api/v1/crates/foo_following/follow")
-                .good()
-                .ok
-        );
-    };
+    // Unfollow the crate and check that we are not following it anymore.
+    unfollow(CRATE_NAME, &user);
+    assert_is_following(CRATE_NAME, false, &user);
+    assert_that!(user.search("following=1").crates, empty());
 
-    assert!(!is_following());
-    follow();
-    follow();
-    assert!(is_following());
-    assert_eq!(user.search("following=1").crates.len(), 1);
-
-    unfollow();
-    unfollow();
-    assert!(!is_following());
-    assert_eq!(user.search("following=1").crates.len(), 0);
+    // Unfollow the crate again and check that this call is also idempotent.
+    unfollow(CRATE_NAME, &user);
+    assert_is_following(CRATE_NAME, false, &user);
 }
 
 #[test]
-fn disallow_api_token_auth_for_get_crate_following_status() {
-    let (app, _, _, token) = TestApp::init().with_token();
-    let api_token = token.as_model();
+fn test_unknown_crate() {
+    let (_, _, user) = TestApp::init().with_user();
 
-    let a_crate = "a_crate";
+    let response = user.get::<()>("/api/v1/crates/unknown-crate/following");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_display_snapshot!(response.text(), @r###"{"errors":[{"detail":"crate `unknown-crate` does not exist"}]}"###);
 
-    app.db(|conn| {
-        CrateBuilder::new(a_crate, api_token.user_id).expect_build(conn);
-    });
+    let response = user.put::<()>("/api/v1/crates/unknown-crate/follow", b"" as &[u8]);
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_display_snapshot!(response.text(), @r###"{"errors":[{"detail":"crate `unknown-crate` does not exist"}]}"###);
 
-    // Token auth on GET for get following status is disallowed
-    token
-        .get(&format!("/api/v1/crates/{a_crate}/following"))
-        .assert_forbidden();
+    let response = user.delete::<()>("/api/v1/crates/unknown-crate/follow");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_display_snapshot!(response.text(), @r###"{"errors":[{"detail":"crate `unknown-crate` does not exist"}]}"###);
 }
 
 #[test]
-fn getting_followed_crates_allows_api_token_auth() {
+fn test_api_token_auth() {
+    const CRATE_TO_FOLLOW: &str = "some_crate_to_follow";
+    const CRATE_NOT_TO_FOLLOW: &str = "another_crate";
+
     let (app, _, user, token) = TestApp::init().with_token();
     let api_token = token.as_model();
 
-    let crate_to_follow = "some_crate_to_follow";
-    let crate_not_followed = "another_crate";
-
     app.db(|conn| {
-        CrateBuilder::new(crate_to_follow, api_token.user_id).expect_build(conn);
-        CrateBuilder::new(crate_not_followed, api_token.user_id).expect_build(conn);
+        CrateBuilder::new(CRATE_TO_FOLLOW, api_token.user_id).expect_build(conn);
+        CrateBuilder::new(CRATE_NOT_TO_FOLLOW, api_token.user_id).expect_build(conn);
     });
 
-    let is_following = |crate_name: &str| -> bool {
-        #[derive(Deserialize)]
-        struct F {
-            following: bool,
-        }
+    follow(CRATE_TO_FOLLOW, &token);
 
-        // Token auth on GET for get following status is disallowed
-        user.get::<F>(&format!("/api/v1/crates/{crate_name}/following"))
-            .good()
-            .following
-    };
-
-    let follow = |crate_name: &str| {
-        assert!(
-            token
-                .put::<OkBool>(&format!("/api/v1/crates/{crate_name}/follow"), b"")
-                .good()
-                .ok
-        );
-    };
-
-    follow(crate_to_follow);
-
-    assert!(is_following(crate_to_follow));
-    assert!(!is_following(crate_not_followed));
+    // Token auth on GET for get following status is disallowed
+    assert_is_following(CRATE_TO_FOLLOW, true, &user);
+    assert_is_following(CRATE_NOT_TO_FOLLOW, false, &user);
 
     let json = token.search("following=1");
-    assert_eq!(json.crates.len(), 1);
+    assert_that!(json.crates, len(eq(1)));
 }

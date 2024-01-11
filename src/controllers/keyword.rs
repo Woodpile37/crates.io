@@ -1,46 +1,55 @@
 use super::prelude::*;
+use crate::app::AppState;
+use axum::extract::{Path, Query};
+use axum::Json;
 
 use crate::controllers::helpers::pagination::PaginationOptions;
 use crate::controllers::helpers::{pagination::Paginated, Paginate};
 use crate::models::Keyword;
 use crate::views::EncodableKeyword;
 
+#[derive(Deserialize)]
+pub struct IndexQuery {
+    sort: Option<String>,
+}
+
 /// Handles the `GET /keywords` route.
-pub fn index(req: &mut dyn RequestExt) -> EndpointResult {
-    use crate::schema::keywords;
+pub async fn index(state: AppState, qp: Query<IndexQuery>, req: Parts) -> AppResult<Json<Value>> {
+    spawn_blocking(move || {
+        use crate::schema::keywords;
 
-    let query = req.query();
-    let sort = query.get("sort").map(|s| &s[..]).unwrap_or("alpha");
+        let mut query = keywords::table.into_boxed();
 
-    let mut query = keywords::table.into_boxed();
+        query = match &qp.sort {
+            Some(sort) if sort == "crates" => query.order(keywords::crates_cnt.desc()),
+            _ => query.order(keywords::keyword.asc()),
+        };
 
-    if sort == "crates" {
-        query = query.order(keywords::crates_cnt.desc());
-    } else {
-        query = query.order(keywords::keyword.asc());
-    }
+        let query = query.pages_pagination(PaginationOptions::builder().gather(&req)?);
+        let conn = &mut state.db_read()?;
+        let data: Paginated<Keyword> = query.load(conn)?;
+        let total = data.total();
+        let kws = data
+            .into_iter()
+            .map(Keyword::into)
+            .collect::<Vec<EncodableKeyword>>();
 
-    let query = query.pages_pagination(PaginationOptions::builder().gather(req)?);
-    let conn = req.db_read()?;
-    let data: Paginated<Keyword> = query.load(&conn)?;
-    let total = data.total();
-    let kws = data
-        .into_iter()
-        .map(Keyword::into)
-        .collect::<Vec<EncodableKeyword>>();
-
-    Ok(req.json(&json!({
-        "keywords": kws,
-        "meta": { "total": total },
-    })))
+        Ok(Json(json!({
+            "keywords": kws,
+            "meta": { "total": total },
+        })))
+    })
+    .await
 }
 
 /// Handles the `GET /keywords/:keyword_id` route.
-pub fn show(req: &mut dyn RequestExt) -> EndpointResult {
-    let name = &req.params()["keyword_id"];
-    let conn = req.db_read()?;
+pub async fn show(Path(name): Path<String>, state: AppState) -> AppResult<Json<Value>> {
+    spawn_blocking(move || {
+        let conn = &mut state.db_read()?;
 
-    let kw = Keyword::find_by_keyword(&conn, name)?;
+        let kw = Keyword::find_by_keyword(conn, &name)?;
 
-    Ok(req.json(&json!({ "keyword": EncodableKeyword::from(kw) })))
+        Ok(Json(json!({ "keyword": EncodableKeyword::from(kw) })))
+    })
+    .await
 }

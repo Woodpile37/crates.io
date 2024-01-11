@@ -22,13 +22,21 @@ export function register(server) {
     return json;
   });
 
-  server.get('/api/v1/me/tokens', function (schema) {
+  server.get('/api/v1/me/tokens', function (schema, request) {
     let { user } = getSession(schema);
     if (!user) {
       return new Response(403, {}, { errors: [{ detail: 'must be logged in to perform that action' }] });
     }
 
-    return schema.apiTokens.where({ userId: user.id }).sort((a, b) => Number(b.id) - Number(a.id));
+    let expiredAfter = new Date();
+    if (request.queryParams.expired_days) {
+      expiredAfter.setUTCDate(expiredAfter.getUTCDate() - request.queryParams.expired_days);
+    }
+
+    return schema.apiTokens
+      .where({ userId: user.id })
+      .filter(token => !token.expiredAt || new Date(token.expiredAt) > expiredAfter)
+      .sort((a, b) => Number(b.id) - Number(a.id));
   });
 
   server.put('/api/v1/me/tokens', function (schema) {
@@ -37,8 +45,21 @@ export function register(server) {
       return new Response(403, {}, { errors: [{ detail: 'must be logged in to perform that action' }] });
     }
 
-    let { name } = this.normalizedRequestAttrs('api-token');
-    let token = server.create('api-token', { user, name, createdAt: new Date().toISOString() });
+    let {
+      name,
+      crateScopes = null,
+      endpointScopes = null,
+      expiredAt = null,
+    } = this.normalizedRequestAttrs('api-token');
+
+    let token = server.create('api-token', {
+      user,
+      name,
+      crateScopes,
+      endpointScopes,
+      expiredAt,
+      createdAt: new Date().toISOString(),
+    });
 
     let json = this.serialize(token);
     json.api_token.revoked = false;

@@ -4,7 +4,7 @@ import { module, test } from 'qunit';
 import window from 'ember-window-mock';
 import { setupWindowMock } from 'ember-window-mock/test-support';
 
-import { setupApplicationTest } from 'cargo/tests/helpers';
+import { setupApplicationTest } from 'crates-io/tests/helpers';
 
 module('Acceptance | Logout', function (hooks) {
   setupApplicationTest(hooks);
@@ -15,12 +15,12 @@ module('Acceptance | Logout', function (hooks) {
     this.authenticateAs(user);
 
     await visit('/crates');
-    assert.equal(currentURL(), '/crates');
+    assert.strictEqual(currentURL(), '/crates');
     assert.dom('[data-test-user-menu] [data-test-toggle]').hasText('John Doe');
 
     await click('[data-test-user-menu] [data-test-toggle]');
     await click('[data-test-user-menu] [data-test-logout-button]');
 
-    assert.equal(window.location.pathname, '/');
+    assert.strictEqual(window.location.pathname, '/');
   });
 });

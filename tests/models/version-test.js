@@ -21,7 +21,7 @@ module('Model | Version', function (hooks) {
     server.create('version', { crate, created_at: '2010-06-16T21:30:45Z' });
 
     let crateRecord = await store.findRecord('crate', crate.name);
-    let versions = (await crateRecord.versions).toArray();
+    let versions = (await crateRecord.versions).slice();
 
     this.clock.setSystemTime(new Date('2010-06-16T21:40:45Z'));
     assert.true(versions[0].isNew);
@@ -36,6 +36,21 @@ module('Model | Version', function (hooks) {
     assert.false(versions[0].isNew);
   });
 
+  test('msrv', async function (assert) {
+    let version = await this.store.createRecord('version');
+    assert.strictEqual(version.msrv, undefined);
+
+    version.rust_version = '1.69.1';
+    assert.strictEqual(version.msrv, '1.69.1');
+
+    version.rust_version = '1.69';
+    assert.strictEqual(version.msrv, '1.69.0');
+
+    // this is not actually allowed by the backend
+    version.rust_version = '1';
+    assert.strictEqual(version.msrv, '1');
+  });
+
   module('semver', function () {
     async function prepare(context, { num }) {
       let { server, store } = context;
@@ -44,7 +59,7 @@ module('Model | Version', function (hooks) {
       server.create('version', { crate, num });
 
       let crateRecord = await store.findRecord('crate', crate.name);
-      let versions = (await crateRecord.versions).toArray();
+      let versions = (await crateRecord.versions).slice();
       return versions[0];
     }
 
@@ -136,7 +151,7 @@ module('Model | Version', function (hooks) {
       }
 
       let crateRecord = await this.store.findRecord('crate', crate.name);
-      let versions = (await crateRecord.versions).toArray();
+      let versions = (await crateRecord.versions).slice();
 
       assert.deepEqual(
         versions.map(it => ({ num: it.num, isHighestOfReleaseTrack: it.isHighestOfReleaseTrack })),
@@ -167,7 +182,7 @@ module('Model | Version', function (hooks) {
       this.server.create('version', { crate, num: '0.4.2', yanked: true });
 
       let crateRecord = await this.store.findRecord('crate', crate.name);
-      let versions = (await crateRecord.versions).toArray();
+      let versions = (await crateRecord.versions).slice();
 
       assert.deepEqual(
         versions.map(it => ({ num: it.num, isHighestOfReleaseTrack: it.isHighestOfReleaseTrack })),
@@ -188,7 +203,7 @@ module('Model | Version', function (hooks) {
       server.create('version', { crate, features });
 
       let crateRecord = await store.findRecord('crate', crate.name);
-      let versions = (await crateRecord.versions).toArray();
+      let versions = (await crateRecord.versions).slice();
       return versions[0];
     }
 
@@ -269,10 +284,10 @@ module('Model | Version', function (hooks) {
 
     let crateRecord = await this.store.findRecord('crate', crate.name);
     assert.ok(crateRecord);
-    let versions = (await crateRecord.versions).toArray();
-    assert.equal(versions.length, 1);
+    let versions = (await crateRecord.versions).slice();
+    assert.strictEqual(versions.length, 1);
     let version = versions[0];
     assert.ok(version.published_by);
-    assert.equal(version.published_by.name, 'JD');
+    assert.strictEqual(version.published_by.name, 'JD');
   });
 });

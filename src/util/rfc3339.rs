@@ -9,7 +9,7 @@ pub fn serialize<S>(dt: &NaiveDateTime, serializer: S) -> Result<S::Ok, S::Error
 where
     S: Serializer,
 {
-    let s = DateTime::<Utc>::from_utc(*dt, Utc).to_rfc3339();
+    let s = DateTime::<Utc>::from_naive_utc_and_offset(*dt, Utc).to_rfc3339();
     serializer.serialize_str(&s)
 }
 pub fn deserialize<'de, D>(deserializer: D) -> Result<NaiveDateTime, D::Error>
@@ -21,7 +21,7 @@ where
     Ok(dt.naive_utc())
 }
 
-/// Wrapper for dealing with Option<NaiveDateTime>
+/// Wrapper for dealing with `Option<NaiveDateTime>`
 pub mod option {
     use chrono::NaiveDateTime;
     use serde::{Deserializer, Serializer};

@@ -3,87 +3,110 @@ name: CI
 on:
   push:
     branches:
-      - auto
+      - main
       - master
-      - try
 
   pull_request:
 
+concurrency:
+  group: ci-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
 env:
-  DIESEL_CLI_VERSION: 1.4.1
-  PNPM_VERSION: 7.9.0
-  RUST_VERSION: 1.64.0
+  CARGO_TERM_COLOR: always
+  # renovate: datasource=crate depName=cargo-deny versioning=semver
+  CARGO_DENY_VERSION: 0.14.3
+  # renovate: datasource=crate depName=diesel_cli versioning=semver
+  DIESEL_CLI_VERSION: 2.1.1
+  # renovate: datasource=npm depName=pnpm
+  PNPM_VERSION: 8.14.0
 
 jobs:
-  frontend:
-    name: Frontend
-    runs-on: ubuntu-20.04
-    env:
-      JOBS: 1 # See https://git.io/vdao3 for details.
-
-      # Percy secrets are included here to enable Percy's GitHub integration
-      # on community-submitted PRs
-      PERCY_TOKEN: 0d8707a02b19aebbec79bb0bf302b8d2fa95edb33169cfe41b084289596670b1
-      PERCY_PROJECT: crates-io/crates.io
+  changed-files:
+    name: Changed Files
+    runs-on: ubuntu-22.04
 
     steps:
-      - uses: actions/checkout@v3.1.0
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
 
-      - uses: pnpm/action-setup@v2.2.4
+      - uses: tj-actions/changed-files@716b1e13042866565e00e85fd4ec490e186c4a2f # v41.0.1
+        id: changed-files-non-js
         with:
-          version: ${{ env.PNPM_VERSION }}
+          files_ignore: |
+            app/**
+            mirage/**
+            public/**
+            tests/**
+            .eslintrc
+            .template-lintrc.js
+            ember-cli-build.js
+            package.json
+            pnpm-lock.yaml
+            testem.js
 
-      - uses: actions/setup-node@v3.5.1
+      - uses: tj-actions/changed-files@716b1e13042866565e00e85fd4ec490e186c4a2f # v41.0.1
+        id: changed-files-non-rust
         with:
-          cache: pnpm
-          node-version-file: package.json
+          files_ignore: |
+            crates_io_*/**
+            migrations/**
+            src/**
+            build.rs
+            Cargo.lock
+            Cargo.toml
+            rust-toolchain.toml
 
-      - name: Install node modules
-        run: pnpm install
+      - uses: tj-actions/changed-files@716b1e13042866565e00e85fd4ec490e186c4a2f # v41.0.1
+        id: changed-files-rust-lockfile
+        with:
+          files: Cargo.lock
 
-      - name: Lint
-        run: |
-          pnpm lint:hbs
-          pnpm lint:js
-          pnpm lint:deps
-
-      - name: Run percy exec
-        if: github.repository == 'rust-lang/crates.io'
-        run: pnpm percy exec -- pnpm test-coverage
-
-      - name: test-coverage
-        if: github.repository != 'rust-lang/crates.io'
-        run: pnpm test-coverage
+    outputs:
+      non-js: ${{ steps.changed-files-non-js.outputs.any_modified }}
+      non-rust: ${{ steps.changed-files-non-rust.outputs.any_modified }}
+      rust-lockfile: ${{ steps.changed-files-rust-lockfile.outputs.any_modified }}
 
   backend-lint:
-    name: Backend (linting)
-    runs-on: ubuntu-20.04
+    name: Backend / Lint
+    runs-on: ubuntu-22.04
+    needs: changed-files
+    if: needs.changed-files.outputs.non-js == 'true'
 
     env:
       RUSTFLAGS: "-D warnings"
+      RUSTDOCFLAGS: "-D warnings"
 
     steps:
-      - uses: actions/checkout@v3.1.0
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
 
-      - run: rustup default ${{ env.RUST_VERSION }}
       - run: rustup component add rustfmt
       - run: rustup component add clippy
 
-      - uses: Swatinem/rust-cache@v2.0.1
+      - uses: Swatinem/rust-cache@a22603398250b864f7190077025cf752307154dc # v2.7.2
 
-      - run: cargo fmt --check
-      - run: cargo clippy --all-targets --all-features --all
+      - run: cargo fmt --check --all
+      - run: cargo clippy --all-targets --all-features --workspace
+      - run: cargo doc --no-deps --document-private-items
 
-  backend:
-    name: Backend
-    runs-on: ubuntu-20.04
+  backend-cargo-deny:
+    name: Backend / cargo-deny
+    runs-on: ubuntu-22.04
+    needs: changed-files
+    if: github.event_name != 'pull_request' || needs.changed-files.outputs.rust-lockfile == 'true'
 
-    continue-on-error: ${{ matrix.rust != 'stable' }}
-    strategy:
-      matrix:
-        rust:
-          - stable
-          - beta
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+
+      - uses: Swatinem/rust-cache@a22603398250b864f7190077025cf752307154dc # v2.7.2
+
+      - run: cargo install cargo-deny --vers ${{ env.CARGO_DENY_VERSION }}
+      - run: cargo deny check
+
+  backend-test:
+    name: Backend / Test
+    runs-on: ubuntu-22.04
+    needs: changed-files
+    if: needs.changed-files.outputs.non-js == 'true'
 
     env:
       RUST_BACKTRACE: 1
@@ -94,7 +117,7 @@ jobs:
 
     services:
       postgres:
-        image: postgres:13
+        image: postgres:13@sha256:eee22204934b36935237e7c92355e3178cfdf3c5377dec9c19c848115cc4637b
         env:
           POSTGRES_PASSWORD: postgres
         # Set health checks to wait until postgres has started
@@ -107,26 +130,69 @@ jobs:
           - 5432:5432
 
     steps:
-      - uses: actions/checkout@v3.1.0
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
 
-      - name: Install ${{ env.RUST_VERSION }} Rust
-        if: matrix.rust == 'stable'
-        run: |
-          rustup update ${{ env.RUST_VERSION }}
-          rustup default ${{ env.RUST_VERSION }}
+      - uses: Swatinem/rust-cache@a22603398250b864f7190077025cf752307154dc # v2.7.2
 
-      - name: Install ${{ matrix.rust }} Rust
-        if: matrix.rust != 'stable'
-        run: |
-          rustup update ${{ matrix.rust }}
-          rustup default ${{ matrix.rust }}
+      - run: cargo install diesel_cli --vers ${{ env.DIESEL_CLI_VERSION }} --no-default-features --features postgres --debug
+      - run: diesel database setup --locked-schema
 
-      - uses: Swatinem/rust-cache@v2.0.1
+      - run: cargo build --tests --workspace
+      - run: cargo test --workspace
 
-      - name: Setup database
-        run: |
-          cargo install diesel_cli --vers ${{ env.DIESEL_CLI_VERSION }} --no-default-features --features postgres --debug
-          diesel database setup --locked-schema
+  frontend-lint:
+    name: Frontend / Lint
+    runs-on: ubuntu-22.04
+    needs: changed-files
+    if: needs.changed-files.outputs.non-rust == 'true'
 
-      - name: Run tests
-        run: cargo test --workspace
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+
+      - uses: pnpm/action-setup@d882d12c64e032187b2edb46d3a0d003b7a43598 # v2.4.0
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - uses: actions/setup-node@b39b52d1213e96004bfcb1c61a8a6fa8ab84f3e8 # v4.0.1
+        with:
+          cache: pnpm
+          node-version-file: package.json
+
+      - run: pnpm install
+
+      - run: pnpm lint:hbs
+      - run: pnpm lint:js
+      - run: pnpm lint:deps
+
+  frontend-test:
+    name: Frontend / Test
+    runs-on: ubuntu-22.04
+    needs: changed-files
+    if: needs.changed-files.outputs.non-rust == 'true'
+
+    env:
+      JOBS: 1 # See https://git.io/vdao3 for details.
+
+      # Percy secrets are included here to enable Percy's GitHub integration
+      # on community-submitted PRs
+      PERCY_TOKEN: web_0a783d8086b6f996809f3e751d032dd6d156782082bcd1423b9b860113c75054
+
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+
+      - uses: pnpm/action-setup@d882d12c64e032187b2edb46d3a0d003b7a43598 # v2.4.0
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - uses: actions/setup-node@b39b52d1213e96004bfcb1c61a8a6fa8ab84f3e8 # v4.0.1
+        with:
+          cache: pnpm
+          node-version-file: package.json
+
+      - run: pnpm install
+
+      - if: github.repository == 'rust-lang/crates.io'
+        run: pnpm percy exec -- pnpm test-coverage
+
+      - if: github.repository != 'rust-lang/crates.io'
+        run: pnpm test-coverage

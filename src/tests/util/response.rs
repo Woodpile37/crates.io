@@ -1,15 +1,17 @@
-use cargo_registry::util::AppResponse;
+use crate::util::matchers::is_success;
+use bytes::Bytes;
+use googletest::prelude::*;
 use serde_json::Value;
 use std::marker::PhantomData;
+use std::str::from_utf8;
 
-use conduit::{Body, HandlerResult};
-
-use conduit::{header, StatusCode};
+use crates_io::rate_limiter::LimitedAction;
+use http::{header, StatusCode};
 
 /// A type providing helper methods for working with responses
 #[must_use]
 pub struct Response<T> {
-    response: AppResponse,
+    response: hyper::Response<Bytes>,
     return_type: PhantomData<T>,
 }
 
@@ -19,27 +21,31 @@ where
 {
     /// Assert that the response is good and deserialize the message
     #[track_caller]
-    pub fn good(mut self) -> T {
-        if !self.status().is_success() {
-            panic!("bad response: {:?}", self.status());
-        }
-        json(&mut self.response)
+    pub fn good(self) -> T {
+        assert_that!(self.status(), is_success());
+        json(&self.response)
     }
 }
 
 impl<T> Response<T> {
     #[track_caller]
-    pub(super) fn new(response: HandlerResult) -> Self {
+    pub(super) fn new(response: hyper::Response<Bytes>) -> Self {
         Self {
-            response: assert_ok!(response),
+            response,
             return_type: PhantomData,
         }
     }
 
     /// Consume the response body and convert it to a JSON value
     #[track_caller]
-    pub fn into_json(mut self) -> Value {
-        json(&mut self.response)
+    pub fn json(&self) -> Value {
+        json(&self.response)
+    }
+
+    #[track_caller]
+    pub fn text(&self) -> String {
+        let bytes = self.response.body();
+        assert_ok!(from_utf8(bytes)).to_string()
     }
 
     pub fn status(&self) -> StatusCode {
@@ -48,15 +54,33 @@ impl<T> Response<T> {
 
     #[track_caller]
     pub fn assert_redirect_ends_with(&self, target: &str) -> &Self {
-        assert!(self
-            .response
-            .headers()
-            .get(header::LOCATION)
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .ends_with(target));
+        let headers = self.response.headers();
+        let location = assert_some!(headers.get(header::LOCATION));
+        let location = assert_ok!(location.to_str());
+        assert_that!(location, ends_with(target));
         self
+    }
+
+    /// Assert that the status code is 429 and that the body matches a rate limit.
+    #[track_caller]
+    pub fn assert_rate_limited(self, action: LimitedAction) {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct ErrorResponse {
+            errors: Vec<ErrorDetails>,
+        }
+        #[derive(Debug, serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct ErrorDetails {
+            detail: String,
+        }
+
+        assert_eq!(self.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        let expected_message_start = format!("{}. Please try again after ", action.error_message());
+        let error: ErrorResponse = json(&self.response);
+        assert_that!(error.errors, len(eq(1)));
+        assert_that!(error.errors[0].detail, starts_with(expected_message_start));
     }
 }
 
@@ -64,49 +88,36 @@ impl Response<()> {
     /// Assert that the status code is 404
     #[track_caller]
     pub fn assert_not_found(&self) {
-        assert_eq!(StatusCode::NOT_FOUND, self.status());
+        assert_eq!(self.status(), StatusCode::NOT_FOUND);
     }
 
     /// Assert that the status code is 403
     #[track_caller]
     pub fn assert_forbidden(&self) {
-        assert_eq!(StatusCode::FORBIDDEN, self.status());
+        assert_eq!(self.status(), StatusCode::FORBIDDEN);
     }
 }
 
-fn json<T>(r: &mut AppResponse) -> T
+fn json<T>(r: &hyper::Response<Bytes>) -> T
 where
     for<'de> T: serde::Deserialize<'de>,
 {
-    use conduit::Body::*;
+    let headers = r.headers();
 
-    let mut body = Body::empty();
-    std::mem::swap(r.body_mut(), &mut body);
-    let body: std::borrow::Cow<'static, [u8]> = match body {
-        Static(slice) => slice.into(),
-        Owned(vec) => vec.into(),
-        File(_) => unimplemented!(),
-    };
+    assert_some_eq!(headers.get(header::CONTENT_TYPE), "application/json");
 
-    assert_eq!(
-        r.headers()
-            .get(header::CONTENT_TYPE)
-            .expect("Missing content-type header"),
-        "application/json; charset=utf-8"
+    let content_length = assert_some!(
+        r.headers().get(header::CONTENT_LENGTH),
+        "Missing content-length header"
     );
+    let content_length = assert_ok!(content_length.to_str());
+    let content_length: usize = assert_ok!(content_length.parse());
 
-    assert_eq!(
-        r.headers()
-            .get(header::CONTENT_LENGTH)
-            .expect("Missing content-length header")
-            .to_str()
-            .unwrap()
-            .parse(),
-        Ok(body.len())
-    );
+    let bytes = r.body();
+    assert_that!(*bytes, len(eq(content_length)));
 
-    match serde_json::from_slice(&body) {
+    match serde_json::from_slice(bytes) {
         Ok(t) => t,
-        Err(e) => panic!("failed to decode: {:?}", e),
+        Err(e) => panic!("failed to decode: {e:?}"),
     }
 }

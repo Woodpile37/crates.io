@@ -1,17 +1,20 @@
 use crate::{
-    config, db,
+    db,
     models::Version,
     schema::{crates, readme_renderings, versions},
-    uploaders::Uploader,
 };
 use anyhow::{anyhow, Context};
+use std::path::PathBuf;
 use std::{io::Read, path::Path, sync::Arc, thread};
 
-use cargo_registry_markdown::text_to_html;
-use chrono::{TimeZone, Utc};
-use diesel::{dsl::any, prelude::*};
+use crate::storage::Storage;
+use chrono::{NaiveDateTime, Utc};
+use crates_io_markdown::text_to_html;
+use crates_io_tarball::{Manifest, StringOrBool};
+use diesel::prelude::*;
 use flate2::read::GzDecoder;
 use reqwest::{blocking::Client, header};
+use std::str::FromStr;
 use tar::{self, Archive};
 
 const USER_AGENT: &str = "crates-admin";
@@ -20,7 +23,7 @@ const USER_AGENT: &str = "crates-admin";
 #[command(
     name = "render-readmes",
     about = "Iterates over every crate versions ever uploaded and (re-)renders their \
-        readme using the readme renderer from the cargo_registry crate.",
+        readme using the readme renderer from the crates_io crate.",
     after_help = "Warning: this can take a lot of time."
 )]
 pub struct Opts {
@@ -38,18 +41,17 @@ pub struct Opts {
 }
 
 pub fn run(opts: Opts) -> anyhow::Result<()> {
-    let base_config = Arc::new(config::Base::from_environment());
-    let conn = db::oneoff_connection().unwrap();
+    let storage = Arc::new(Storage::from_environment());
+    let conn = &mut db::oneoff_connection()?;
 
     let start_time = Utc::now();
 
     let older_than = if let Some(ref time) = opts.older_than {
-        Utc.datetime_from_str(time, "%Y-%m-%d %H:%M:%S")
-            .expect("Could not parse --older-than argument as a time")
+        NaiveDateTime::parse_from_str(time, "%Y-%m-%d %H:%M:%S")
+            .context("Could not parse --older-than argument as a time")?
     } else {
-        start_time
+        start_time.naive_utc()
     };
-    let older_than = older_than.naive_utc();
 
     println!("Start time:                   {start_time}");
     println!("Rendering readmes older than: {older_than}");
@@ -70,7 +72,7 @@ pub fn run(opts: Opts) -> anyhow::Result<()> {
         query = query.filter(crates::name.eq(crate_name));
     }
 
-    let version_ids: Vec<i32> = query.load(&conn).expect("error loading version ids");
+    let version_ids: Vec<i32> = query.load(conn).context("error loading version ids")?;
 
     let total_versions = version_ids.len();
     println!("Rendering {total_versions} versions");
@@ -95,26 +97,30 @@ pub fn run(opts: Opts) -> anyhow::Result<()> {
 
         let versions: Vec<(Version, String)> = versions::table
             .inner_join(crates::table)
-            .filter(versions::id.eq(any(version_ids_chunk)))
+            .filter(versions::id.eq_any(version_ids_chunk))
             .select((versions::all_columns, crates::name))
-            .load(&conn)
-            .expect("error loading versions");
+            .load(conn)
+            .context("error loading versions")?;
 
-        let mut tasks = Vec::with_capacity(page_size as usize);
+        let mut tasks = Vec::with_capacity(page_size);
         for (version, krate_name) in versions {
-            Version::record_readme_rendering(version.id, &conn)
+            Version::record_readme_rendering(version.id, conn)
                 .context("Couldn't record rendering time")?;
 
             let client = client.clone();
-            let base_config = base_config.clone();
+            let storage = storage.clone();
             let handle = thread::spawn::<_, anyhow::Result<()>>(move || {
                 println!("[{}-{}] Rendering README...", krate_name, version.num);
-                let readme = get_readme(base_config.uploader(), &client, &version, &krate_name)?;
+                let readme = get_readme(&storage, &client, &version, &krate_name)?;
+                if !readme.is_empty() {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .context("Failed to initialize tokio runtime")?;
 
-                base_config
-                    .uploader()
-                    .upload_readme(&client, &krate_name, &version.num, readme)
-                    .context("Failed to upload rendered README file to S3")?;
+                    rt.block_on(storage.upload_readme(&krate_name, &version.num, readme.into()))
+                        .context("Failed to upload rendered README file to S3")?;
+                }
 
                 Ok(())
             });
@@ -134,32 +140,27 @@ pub fn run(opts: Opts) -> anyhow::Result<()> {
 
 /// Renders the readme of an uploaded crate version.
 fn get_readme(
-    uploader: &Uploader,
+    storage: &Storage,
     client: &Client,
     version: &Version,
     krate_name: &str,
 ) -> anyhow::Result<String> {
     let pkg_name = format!("{}-{}", krate_name, version.num);
 
-    let location = uploader.crate_location(krate_name, &version.num.to_string());
-
-    let location = match uploader {
-        Uploader::S3 { .. } => location,
-        Uploader::Local => format!("http://localhost:8888/{location}"),
-    };
+    let location = storage.crate_location(krate_name, &version.num.to_string());
 
     let mut extra_headers = header::HeaderMap::new();
     extra_headers.insert(
         header::USER_AGENT,
         header::HeaderValue::from_static(USER_AGENT),
     );
-    let request = client.get(&location).headers(extra_headers);
+    let request = client.get(location).headers(extra_headers);
     let response = request.send().context("Failed to fetch crate")?;
 
     if !response.status().is_success() {
         return Err(anyhow!(
             "Failed to get a 200 response: {}",
-            response.text().unwrap()
+            response.text()?
         ));
     }
 
@@ -176,42 +177,43 @@ fn render_pkg_readme<R: Read>(mut archive: Archive<R>, pkg_name: &str) -> anyhow
         let contents = find_file_by_path(&mut entries, Path::new(&path))
             .context("Failed to read Cargo.toml file")?;
 
-        toml::from_str(&contents).context("Failed to parse manifest file")?
+        Manifest::from_str(&contents).context("Failed to parse manifest file")?
+
+        // We don't call `validate_manifest()` here since the additional validation is not needed
+        // and it would prevent us from reading a couple of legacy crate files.
     };
 
     let rendered = {
-        let readme_path = manifest
+        let readme = manifest
             .package
-            .readme
-            .clone()
-            .unwrap_or_else(|| "README.md".into());
-        let path = format!("{pkg_name}/{readme_path}");
+            .as_ref()
+            .and_then(|p| p.readme.as_ref())
+            .and_then(|r| r.as_ref().as_local());
+
+        let readme_path = match readme {
+            Some(StringOrBool::Bool(bool)) if !(*bool) => return Ok("".to_string()),
+            Some(StringOrBool::String(path)) => PathBuf::from(path),
+            _ => PathBuf::from("README.md"),
+        };
+
+        let path = Path::new(pkg_name).join(&readme_path);
         let contents = find_file_by_path(&mut entries, Path::new(&path))
-            .with_context(|| format!("Failed to read {readme_path} file"))?;
+            .with_context(|| format!("Failed to read {} file", readme_path.display()))?;
 
         // pkg_path_in_vcs Unsupported from admin::render_readmes. See #4095
         // Would need access to cargo_vcs_info
         let pkg_path_in_vcs = None;
 
-        text_to_html(
-            &contents,
-            &readme_path,
-            manifest.package.repository.as_deref(),
-            pkg_path_in_vcs,
-        )
+        let repository = manifest
+            .package
+            .as_ref()
+            .and_then(|p| p.repository.as_ref())
+            .and_then(|r| r.as_ref().as_local())
+            .map(|s| s.as_str());
+
+        text_to_html(&contents, &readme_path, repository, pkg_path_in_vcs)
     };
-    return Ok(rendered);
-
-    #[derive(Debug, Deserialize)]
-    struct Package {
-        readme: Option<String>,
-        repository: Option<String>,
-    }
-
-    #[derive(Debug, Deserialize)]
-    struct Manifest {
-        package: Package,
-    }
+    Ok(rendered)
 }
 
 /// Search an entry by its path in a Tar archive.
@@ -236,31 +238,25 @@ fn find_file_by_path<R: Read>(
 
 #[cfg(test)]
 pub mod tests {
-    use std::io::Write;
-    use tar;
+    use crates_io_tarball::TarballBuilder;
 
     use super::render_pkg_readme;
 
-    pub fn add_file<W: Write>(pkg: &mut tar::Builder<W>, path: &str, content: &[u8]) {
-        let mut header = tar::Header::new_gnu();
-        header.set_size(content.len() as u64);
-        header.set_cksum();
-        pkg.append_data(&mut header, path, content).unwrap();
-    }
-
     #[test]
     fn test_render_pkg_readme() {
-        let mut pkg = tar::Builder::new(vec![]);
-        add_file(
-            &mut pkg,
-            "foo-0.0.1/Cargo.toml",
-            br#"
+        let serialized_archive = TarballBuilder::new()
+            .add_file(
+                "foo-0.0.1/Cargo.toml",
+                br#"
 [package]
+name = "foo"
+version = "0.0.1"
 readme = "README.md"
 "#,
-        );
-        add_file(&mut pkg, "foo-0.0.1/README.md", b"readme");
-        let serialized_archive = pkg.into_inner().unwrap();
+            )
+            .add_file("foo-0.0.1/README.md", b"readme")
+            .build_unzipped();
+
         let result =
             render_pkg_readme(tar::Archive::new(&*serialized_archive), "foo-0.0.1").unwrap();
         assert!(result.contains("readme"))
@@ -268,15 +264,15 @@ readme = "README.md"
 
     #[test]
     fn test_render_pkg_no_readme() {
-        let mut pkg = tar::Builder::new(vec![]);
-        add_file(
-            &mut pkg,
-            "foo-0.0.1/Cargo.toml",
-            br#"
+        let serialized_archive = TarballBuilder::new()
+            .add_file(
+                "foo-0.0.1/Cargo.toml",
+                br#"
 [package]
 "#,
-        );
-        let serialized_archive = pkg.into_inner().unwrap();
+            )
+            .build_unzipped();
+
         assert_err!(render_pkg_readme(
             tar::Archive::new(&*serialized_archive),
             "foo-0.0.1"
@@ -285,16 +281,18 @@ readme = "README.md"
 
     #[test]
     fn test_render_pkg_implicit_readme() {
-        let mut pkg = tar::Builder::new(vec![]);
-        add_file(
-            &mut pkg,
-            "foo-0.0.1/Cargo.toml",
-            br#"
+        let serialized_archive = TarballBuilder::new()
+            .add_file(
+                "foo-0.0.1/Cargo.toml",
+                br#"
 [package]
+name = "foo"
+version = "0.0.1"
 "#,
-        );
-        add_file(&mut pkg, "foo-0.0.1/README.md", b"readme");
-        let serialized_archive = pkg.into_inner().unwrap();
+            )
+            .add_file("foo-0.0.1/README.md", b"readme")
+            .build_unzipped();
+
         let result =
             render_pkg_readme(tar::Archive::new(&*serialized_archive), "foo-0.0.1").unwrap();
         assert!(result.contains("readme"))
@@ -302,22 +300,20 @@ readme = "README.md"
 
     #[test]
     fn test_render_pkg_readme_w_link() {
-        let mut pkg = tar::Builder::new(vec![]);
-        add_file(
-            &mut pkg,
-            "foo-0.0.1/Cargo.toml",
-            br#"
+        let serialized_archive = TarballBuilder::new()
+            .add_file(
+                "foo-0.0.1/Cargo.toml",
+                br#"
 [package]
+name = "foo"
+version = "0.0.1"
 readme = "README.md"
 repository = "https://github.com/foo/foo"
 "#,
-        );
-        add_file(
-            &mut pkg,
-            "foo-0.0.1/README.md",
-            b"readme [link](./Other.md)",
-        );
-        let serialized_archive = pkg.into_inner().unwrap();
+            )
+            .add_file("foo-0.0.1/README.md", b"readme [link](./Other.md)")
+            .build_unzipped();
+
         let result =
             render_pkg_readme(tar::Archive::new(&*serialized_archive), "foo-0.0.1").unwrap();
         assert!(result.contains("\"https://github.com/foo/foo/blob/HEAD/./Other.md\""))
@@ -325,22 +321,23 @@ repository = "https://github.com/foo/foo"
 
     #[test]
     fn test_render_pkg_readme_not_at_root() {
-        let mut pkg = tar::Builder::new(vec![]);
-        add_file(
-            &mut pkg,
-            "foo-0.0.1/Cargo.toml",
-            br#"
+        let serialized_archive = TarballBuilder::new()
+            .add_file(
+                "foo-0.0.1/Cargo.toml",
+                br#"
 [package]
+name = "foo"
+version = "0.0.1"
 readme = "docs/README.md"
 repository = "https://github.com/foo/foo"
 "#,
-        );
-        add_file(
-            &mut pkg,
-            "foo-0.0.1/docs/README.md",
-            b"docs/readme [link](./Other.md)",
-        );
-        let serialized_archive = pkg.into_inner().unwrap();
+            )
+            .add_file(
+                "foo-0.0.1/docs/README.md",
+                b"docs/readme [link](./Other.md)",
+            )
+            .build_unzipped();
+
         let result =
             render_pkg_readme(tar::Archive::new(&*serialized_archive), "foo-0.0.1").unwrap();
         assert!(result.contains("docs/readme"));

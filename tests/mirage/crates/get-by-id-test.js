@@ -11,7 +11,7 @@ module('Mirage | GET /api/v1/crates/:id', function (hooks) {
 
   test('returns 404 for unknown crates', async function (assert) {
     let response = await fetch('/api/v1/crates/foo');
-    assert.equal(response.status, 404);
+    assert.strictEqual(response.status, 404);
     assert.deepEqual(await response.json(), { errors: [{ detail: 'Not Found' }] });
   });
 
@@ -20,7 +20,7 @@ module('Mirage | GET /api/v1/crates/:id', function (hooks) {
     this.server.create('version', { crate, num: '1.0.0-beta.1' });
 
     let response = await fetch('/api/v1/crates/rand');
-    assert.equal(response.status, 200);
+    assert.strictEqual(response.status, 200);
     assert.deepEqual(await response.json(), {
       categories: [],
       crate: {
@@ -65,6 +65,7 @@ module('Mirage | GET /api/v1/crates/:id', function (hooks) {
           num: '1.0.0-beta.1',
           published_by: null,
           readme_path: '/api/v1/crates/rand/1.0.0-beta.1/readme',
+          rust_version: null,
           updated_at: '2017-02-24T12:34:56Z',
           yanked: false,
         },
@@ -79,26 +80,27 @@ module('Mirage | GET /api/v1/crates/:id', function (hooks) {
     this.server.create('version', { crate, num: '1.2.0' });
 
     let response = await fetch('/api/v1/crates/rand');
-    assert.equal(response.status, 200);
+    assert.strictEqual(response.status, 200);
 
     let responsePayload = await response.json();
     assert.deepEqual(responsePayload.crate.versions, ['1', '2', '3']);
     assert.deepEqual(responsePayload.versions, [
       {
-        id: '1',
+        id: '3',
         crate: 'rand',
-        crate_size: 0,
+        crate_size: 325_926,
         created_at: '2010-06-16T21:30:45Z',
-        dl_path: '/api/v1/crates/rand/1.0.0/download',
-        downloads: 0,
-        license: 'MIT/Apache-2.0',
+        dl_path: '/api/v1/crates/rand/1.2.0/download',
+        downloads: 7404,
+        license: 'Apache-2.0',
         links: {
-          dependencies: '/api/v1/crates/rand/1.0.0/dependencies',
-          version_downloads: '/api/v1/crates/rand/1.0.0/downloads',
+          dependencies: '/api/v1/crates/rand/1.2.0/dependencies',
+          version_downloads: '/api/v1/crates/rand/1.2.0/downloads',
         },
-        num: '1.0.0',
+        num: '1.2.0',
         published_by: null,
-        readme_path: '/api/v1/crates/rand/1.0.0/readme',
+        readme_path: '/api/v1/crates/rand/1.2.0/readme',
+        rust_version: null,
         updated_at: '2017-02-24T12:34:56Z',
         yanked: false,
       },
@@ -117,24 +119,26 @@ module('Mirage | GET /api/v1/crates/:id', function (hooks) {
         num: '1.1.0',
         published_by: null,
         readme_path: '/api/v1/crates/rand/1.1.0/readme',
+        rust_version: null,
         updated_at: '2017-02-24T12:34:56Z',
         yanked: false,
       },
       {
-        id: '3',
+        id: '1',
         crate: 'rand',
-        crate_size: 325_926,
+        crate_size: 0,
         created_at: '2010-06-16T21:30:45Z',
-        dl_path: '/api/v1/crates/rand/1.2.0/download',
-        downloads: 7404,
-        license: 'Apache-2.0',
+        dl_path: '/api/v1/crates/rand/1.0.0/download',
+        downloads: 0,
+        license: 'MIT/Apache-2.0',
         links: {
-          dependencies: '/api/v1/crates/rand/1.2.0/dependencies',
-          version_downloads: '/api/v1/crates/rand/1.2.0/downloads',
+          dependencies: '/api/v1/crates/rand/1.0.0/dependencies',
+          version_downloads: '/api/v1/crates/rand/1.0.0/downloads',
         },
-        num: '1.2.0',
+        num: '1.0.0',
         published_by: null,
-        readme_path: '/api/v1/crates/rand/1.2.0/readme',
+        readme_path: '/api/v1/crates/rand/1.0.0/readme',
+        rust_version: null,
         updated_at: '2017-02-24T12:34:56Z',
         yanked: false,
       },
@@ -148,7 +152,7 @@ module('Mirage | GET /api/v1/crates/:id', function (hooks) {
     this.server.create('version', { crate });
 
     let response = await fetch('/api/v1/crates/rand');
-    assert.equal(response.status, 200);
+    assert.strictEqual(response.status, 200);
 
     let responsePayload = await response.json();
     assert.deepEqual(responsePayload.crate.categories, ['no-std']);
@@ -171,7 +175,7 @@ module('Mirage | GET /api/v1/crates/:id', function (hooks) {
     this.server.create('version', { crate });
 
     let response = await fetch('/api/v1/crates/rand');
-    assert.equal(response.status, 200);
+    assert.strictEqual(response.status, 200);
 
     let responsePayload = await response.json();
     assert.deepEqual(responsePayload.crate.keywords, ['no-std']);

@@ -1,84 +1,69 @@
 {
-    "extends": [
-        "config:base",
+    extends: [
+        "config:best-practices",
         ":pinAllExceptPeerDependencies",
-        ":dependencyDashboard",
         ":maintainLockFilesWeekly",
         ":prConcurrentLimitNone",
         ":prHourlyLimitNone",
         ":semanticCommitsDisabled",
         ":automergeLinters",
         ":automergeTesters",
+        "regexManagers:dockerfileVersions",
+        "regexManagers:githubActionsVersions",
+        "github>Turbo87/renovate-config//rust/updateToolchain",
     ],
-    "js": {
-        "labels": ["A-frontend"],
-    },
-    "rust": {
-        "labels": ["A-backend"],
-    },
-    "regexManagers": [
+    packageRules: [
         {
-            "fileMatch": ["^.github/workflows/[^\\.]+\\.ya?ml$"],
-            "matchStrings": ["CARGO_TARPAULIN_VERSION:\\s*(?<currentValue>.*?)\n"],
-            "depNameTemplate": "cargo-tarpaulin",
-            "datasourceTemplate": "crate",
-            "versioningTemplate": "semver"
+            matchCategories: ["rust"],
+            labels: ["A-backend ⚙️"],
         },
         {
-            "fileMatch": ["^.github/workflows/[^\\.]+\\.ya?ml$"],
-            "matchStrings": ["DIESEL_CLI_VERSION:\\s*(?<currentValue>.*?)\n"],
-            "depNameTemplate": "diesel_cli",
-            "datasourceTemplate": "crate",
-            "versioningTemplate": "semver",
+            matchCategories: ["js"],
+            labels: ["A-frontend 🐹"],
         },
         {
-            "fileMatch": ["^.github/workflows/[^\\.]+\\.ya?ml$"],
-            "matchStrings": ["RUST_VERSION:\\s*(?<currentValue>.*?)\n"],
-            "depNameTemplate": "rust",
-            "datasourceTemplate": "github-releases",
-            "lookupNameTemplate": "rust-lang/rust",
+            matchPackageNames: ["ember-cli", "ember-data", "ember-source"],
+            separateMinorPatch: true,
         },
         {
-            "fileMatch": ["^RustConfig$"],
-            "matchStrings": ["VERSION=(?<currentValue>.*?)\n"],
-            "depNameTemplate": "rust",
-            "datasourceTemplate": "github-releases",
-            "lookupNameTemplate": "rust-lang/rust",
-        }
+            matchPackageNames: [
+                "@percy/cli",
+                "tj-actions/changed-files",
+                "webpack",
+            ],
+            extends: ["schedule:weekly"],
+        },
+        {
+            // Avoid "Artifact update problem" for pnpm updates when the renovatebot
+            // setup does not support the new version yet.
+            matchPackageNames: ["pnpm"],
+            minimumReleaseAge: "24 hours",
+        },
+        {
+            matchCategories: ["js"],
+            matchUpdateTypes: ["lockFileMaintenance"],
+            additionalBranchPrefix: "js-",
+            commitMessageSuffix: "(JS)",
+        },
+        {
+            matchCategories: ["rust"],
+            matchUpdateTypes: ["lockFileMaintenance"],
+            additionalBranchPrefix: "rust-",
+            commitMessageSuffix: "(Rust)",
+        },
+        {
+            matchManagers: ["custom.regex"],
+            matchPackageNames: ["rust"],
+            commitMessageTopic: "Rust",
+            labels: ["A-backend ⚙️"],
+        },
+        {
+            matchPackagePatterns: ["^diesel$", "^diesel_"],
+            groupName: "diesel packages",
+        },
+        {
+            matchUpdateTypes: ["digest"],
+            enabled: false,
+        },
     ],
-    "packageRules": [{
-        "matchPackageNames": ["ember-cli", "ember-data", "ember-source"],
-        "separateMinorPatch": true,
-    }, {
-        "matchPackageNames": ["@percy/cli", "webpack"],
-        "extends": ["schedule:weekly"],
-    }, {
-        "matchLanguages": ["js"],
-        "matchUpdateTypes": ["lockFileMaintenance"],
-        "additionalBranchPrefix": "js-",
-        "commitMessageSuffix": "(JS)",
-    }, {
-        "matchLanguages": ["rust"],
-        "matchUpdateTypes": ["lockFileMaintenance"],
-        "additionalBranchPrefix": "rust-",
-        "commitMessageSuffix": "(Rust)",
-    }, {
-        "matchManagers": ["regex"],
-        "matchPackageNames": ["rust"],
-        "commitMessageTopic": "Rust",
-        "labels": ["A-backend"],
-    }, {
-        "matchPackagePatterns": [
-            "^conduit$",
-            "^conduit-",
-            "^sentry-conduit$",
-        ],
-        "groupName": "conduit packages",
-    }, {
-        "matchPackagePatterns": [
-            "^diesel$",
-            "^diesel_",
-        ],
-        "groupName": "diesel packages",
-    }],
 }

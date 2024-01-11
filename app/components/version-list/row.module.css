@@ -94,7 +94,22 @@
     }
 }
 
+.rt-latest {
+    color: hsl(136, 67%, 38%);
+}
+
+.rt-prerelease {
+    color: hsl(35, 95%, 59%);
+}
+
+.rt-yanked {
+    color: hsl(0, 87%, 58%);
+}
+
 .num-link {
+    max-width: 200px;
+    text-overflow: ellipsis;
+    overflow: hidden;
     color: var(--fg-color);
     font-weight: 500;
     font-variant-numeric: tabular-nums;
@@ -184,14 +199,22 @@
     }
 }
 
-.date {
-    &.new {
-        color: hsl(39, 98%, 47%);
+.date.new, :global(.tooltip) .new {
+    color: hsl(39, 98%, 47%);
+}
+
+.msrv {
+    text-transform: initial;
+
+    svg {
+        /* this makes the text look a little more aligned with the icon... 🤷 */
+        margin-bottom: -0.15em;
     }
 }
 
 .bytes {
     font-variant-numeric: tabular-nums;
+    text-transform: none;
 }
 
 .feature-list {

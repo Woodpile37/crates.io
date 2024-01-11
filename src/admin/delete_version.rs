@@ -1,10 +1,8 @@
-use crate::{
-    admin::dialoguer,
-    db,
-    models::{Crate, Version},
-    schema::versions,
-};
-
+use crate::schema::crates;
+use crate::storage::Storage;
+use crate::worker::jobs;
+use crate::{admin::dialoguer, db, schema::versions};
+use anyhow::Context;
 use diesel::prelude::*;
 
 #[derive(clap::Parser, Debug)]
@@ -16,45 +14,87 @@ use diesel::prelude::*;
 pub struct Opts {
     /// Name of the crate
     crate_name: String,
-    /// Version number that should be deleted
-    version: String,
+
+    /// Version numbers that should be deleted
+    #[arg(value_name = "VERSION", required = true)]
+    versions: Vec<String>,
+
     /// Don't ask for confirmation: yes, we are sure. Best for scripting.
     #[arg(short, long)]
     yes: bool,
 }
 
-pub fn run(opts: Opts) {
-    let conn = db::oneoff_connection().unwrap();
-    conn.transaction::<_, diesel::result::Error, _>(|| {
-        delete(opts, &conn);
-        Ok(())
-    })
-    .unwrap()
-}
+pub fn run(opts: Opts) -> anyhow::Result<()> {
+    let crate_name = &opts.crate_name;
 
-fn delete(opts: Opts, conn: &PgConnection) {
-    let krate: Crate = Crate::by_name(&opts.crate_name).first(conn).unwrap();
-    let v: Version = Version::belonging_to(&krate)
-        .filter(versions::num.eq(&opts.version))
+    let conn = &mut db::oneoff_connection().context("Failed to establish database connection")?;
+
+    let store = Storage::from_environment();
+
+    let crate_id: i32 = crates::table
+        .select(crates::id)
+        .filter(crates::name.eq(crate_name))
         .first(conn)
-        .unwrap();
+        .context("Failed to look up crate id from the database")?;
 
-    if !opts.yes {
-        let prompt = format!(
-            "Are you sure you want to delete {}#{} ({})?",
-            opts.crate_name, opts.version, v.id
-        );
-        if !dialoguer::confirm(&prompt) {
-            return;
+    println!("Deleting the following versions of the `{crate_name}` crate:");
+    println!();
+    for version in &opts.versions {
+        println!(" - {version}");
+    }
+    println!();
+
+    if !opts.yes && !dialoguer::confirm("Do you want to permanently delete these versions?") {
+        return Ok(());
+    }
+
+    info!(%crate_name, %crate_id, versions = ?opts.versions, "Deleting versions from the database");
+    let result = diesel::delete(
+        versions::table
+            .filter(versions::crate_id.eq(crate_id))
+            .filter(versions::num.eq_any(&opts.versions)),
+    )
+    .execute(conn);
+
+    match result {
+        Ok(num_deleted) if num_deleted == opts.versions.len() => {}
+        Ok(num_deleted) => {
+            warn!(
+                %crate_name,
+                "Deleted only {num_deleted} of {num_expected} versions from the database",
+                num_expected = opts.versions.len()
+            );
+        }
+        Err(error) => {
+            warn!(%crate_name, ?error, "Failed to delete versions from the database")
         }
     }
 
-    println!("deleting version {} ({})", v.num, v.id);
-    diesel::delete(versions::table.find(&v.id))
-        .execute(conn)
-        .unwrap();
-
-    if !opts.yes && !dialoguer::confirm("commit?") {
-        panic!("aborting transaction");
+    info!(%crate_name, "Enqueuing index sync jobs");
+    if let Err(error) = jobs::enqueue_sync_to_index(crate_name, conn) {
+        warn!(%crate_name, ?error, "Failed to enqueue index sync jobs");
     }
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("Failed to initialize tokio runtime")?;
+
+    for version in &opts.versions {
+        debug!(%crate_name, %version, "Deleting crate file from S3");
+        if let Err(error) = rt.block_on(store.delete_crate_file(crate_name, version)) {
+            warn!(%crate_name, %version, ?error, "Failed to delete crate file from S3");
+        }
+
+        debug!(%crate_name, %version, "Deleting readme file from S3");
+        match rt.block_on(store.delete_readme(crate_name, version)) {
+            Err(object_store::Error::NotFound { .. }) => {}
+            Err(error) => {
+                warn!(%crate_name, %version, ?error, "Failed to delete readme file from S3")
+            }
+            Ok(_) => {}
+        }
+    }
+
+    Ok(())
 }

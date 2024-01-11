@@ -12,7 +12,11 @@
 //! - `DB_TCP_TIMEOUT_MS`: TCP timeout in milliseconds. See the doc comment for more details.
 
 use crate::config::Base;
-use crate::{env, Env};
+use crate::Env;
+use anyhow::anyhow;
+use crates_io_env_vars::{required_var, var, var_parsed};
+use secrecy::SecretString;
+use std::time::Duration;
 
 pub struct DatabasePools {
     /// Settings for the primary database. This is usually writeable, but will be read-only in
@@ -26,13 +30,22 @@ pub struct DatabasePools {
     /// unnecessarily long outage (before the unhealthy database logic kicks in), while setting it
     /// too low might result in healthy connections being dropped.
     pub tcp_timeout_ms: u64,
+    /// Time to wait for a connection to become available from the connection
+    /// pool before returning an error.
+    pub connection_timeout: Duration,
+    /// Time to wait for a query response before canceling the query and
+    /// returning an error.
+    pub statement_timeout: Duration,
+    /// Number of threads to use for asynchronous operations such as connection
+    /// creation.
+    pub helper_threads: usize,
     /// Whether to enforce that all the database connections are encrypted with TLS.
     pub enforce_tls: bool,
 }
 
 #[derive(Debug)]
 pub struct DbPoolConfig {
-    pub url: String,
+    pub url: SecretString,
     pub read_only_mode: bool,
     pub pool_size: u32,
     pub min_idle: Option<u32>,
@@ -52,55 +65,53 @@ impl DatabasePools {
     /// # Panics
     ///
     /// This function panics if `DB_OFFLINE=leader` but `READ_ONLY_REPLICA_URL` is unset.
-    pub fn full_from_environment(base: &Base) -> Self {
-        let leader_url = env("DATABASE_URL");
-        let follower_url = dotenv::var("READ_ONLY_REPLICA_URL").ok();
-        let read_only_mode = dotenv::var("READ_ONLY_MODE").is_ok();
+    pub fn full_from_environment(base: &Base) -> anyhow::Result<Self> {
+        let leader_url = required_var("DATABASE_URL")?.into();
+        let follower_url = var("READ_ONLY_REPLICA_URL")?.map(Into::into);
+        let read_only_mode = var("READ_ONLY_MODE")?.is_some();
 
-        let primary_pool_size = match dotenv::var("DB_PRIMARY_POOL_SIZE") {
-            Ok(num) => num.parse().expect("couldn't parse DB_PRIMARY_POOL_SIZE"),
-            _ => Self::DEFAULT_POOL_SIZE,
-        };
+        let primary_pool_size =
+            var_parsed("DB_PRIMARY_POOL_SIZE")?.unwrap_or(Self::DEFAULT_POOL_SIZE);
+        let replica_pool_size =
+            var_parsed("DB_REPLICA_POOL_SIZE")?.unwrap_or(Self::DEFAULT_POOL_SIZE);
 
-        let replica_pool_size = match dotenv::var("DB_REPLICA_POOL_SIZE") {
-            Ok(num) => num.parse().expect("couldn't parse DB_REPLICA_POOL_SIZE"),
-            _ => Self::DEFAULT_POOL_SIZE,
-        };
+        let primary_min_idle = var_parsed("DB_PRIMARY_MIN_IDLE")?;
+        let replica_min_idle = var_parsed("DB_REPLICA_MIN_IDLE")?;
 
-        let primary_min_idle = match dotenv::var("DB_PRIMARY_MIN_IDLE") {
-            Ok(num) => Some(num.parse().expect("couldn't parse DB_PRIMARY_MIN_IDLE")),
-            _ => None,
-        };
+        let tcp_timeout_ms = var_parsed("DB_TCP_TIMEOUT_MS")?.unwrap_or(15 * 1000);
 
-        let replica_min_idle = match dotenv::var("DB_REPLICA_MIN_IDLE") {
-            Ok(num) => Some(num.parse().expect("couldn't parse DB_REPLICA_MIN_IDLE")),
-            _ => None,
-        };
+        let connection_timeout = var_parsed("DB_TIMEOUT")?.unwrap_or(30);
+        let connection_timeout = Duration::from_secs(connection_timeout);
 
-        let tcp_timeout_ms = match dotenv::var("DB_TCP_TIMEOUT_MS") {
-            Ok(num) => num.parse().expect("couldn't parse DB_TCP_TIMEOUT_MS"),
-            Err(_) => 15 * 1000, // 15 seconds
-        };
+        // `DB_TIMEOUT` currently configures both the connection timeout and
+        // the statement timeout, so we can copy the parsed connection timeout.
+        let statement_timeout = connection_timeout;
+
+        let helper_threads = var_parsed("DB_HELPER_THREADS")?.unwrap_or(3);
 
         let enforce_tls = base.env == Env::Production;
 
-        match dotenv::var("DB_OFFLINE").as_deref() {
+        Ok(match var("DB_OFFLINE")?.as_deref() {
             // The actual leader is down, use the follower in read-only mode as the primary and
             // don't configure a replica.
-            Ok("leader") => Self {
+            Some("leader") => Self {
                 primary: DbPoolConfig {
-                    url: follower_url
-                        .expect("Must set `READ_ONLY_REPLICA_URL` when using `DB_OFFLINE=leader`."),
+                    url: follower_url.ok_or_else(|| {
+                        anyhow!("Must set `READ_ONLY_REPLICA_URL` when using `DB_OFFLINE=leader`.")
+                    })?,
                     read_only_mode: true,
                     pool_size: primary_pool_size,
                     min_idle: primary_min_idle,
                 },
                 replica: None,
                 tcp_timeout_ms,
+                connection_timeout,
+                statement_timeout,
+                helper_threads,
                 enforce_tls,
             },
             // The follower is down, don't configure the replica.
-            Ok("follower") => Self {
+            Some("follower") => Self {
                 primary: DbPoolConfig {
                     url: leader_url,
                     read_only_mode,
@@ -109,6 +120,9 @@ impl DatabasePools {
                 },
                 replica: None,
                 tcp_timeout_ms,
+                connection_timeout,
+                statement_timeout,
+                helper_threads,
                 enforce_tls,
             },
             _ => Self {
@@ -128,22 +142,11 @@ impl DatabasePools {
                     min_idle: replica_min_idle,
                 }),
                 tcp_timeout_ms,
+                connection_timeout,
+                statement_timeout,
+                helper_threads,
                 enforce_tls,
             },
-        }
-    }
-
-    pub fn test_from_environment() -> Self {
-        DatabasePools {
-            primary: DbPoolConfig {
-                url: env("TEST_DATABASE_URL"),
-                read_only_mode: false,
-                pool_size: 1,
-                min_idle: None,
-            },
-            replica: None,
-            tcp_timeout_ms: 1000, // 1 second
-            enforce_tls: false,
-        }
+        })
     }
 }

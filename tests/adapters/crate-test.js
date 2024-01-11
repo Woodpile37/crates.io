@@ -2,7 +2,7 @@ import { module, test } from 'qunit';
 
 import { setupMirage } from 'ember-cli-mirage/test-support';
 
-import { setupTest } from 'cargo/tests/helpers';
+import { setupTest } from 'crates-io/tests/helpers';
 
 module('Adapter | crate', function (hooks) {
   setupTest(hooks);
@@ -21,7 +21,7 @@ module('Adapter | crate', function (hooks) {
     let store = this.owner.lookup('service:store');
 
     let [foo, bar] = await Promise.all([store.findRecord('crate', 'foo'), store.findRecord('crate', 'bar')]);
-    assert.equal(foo?.name, 'foo');
-    assert.equal(bar?.name, 'bar');
+    assert.strictEqual(foo?.name, 'foo');
+    assert.strictEqual(bar?.name, 'bar');
   });
 });

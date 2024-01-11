@@ -1,0 +1,232 @@
+.form-group, .buttons {
+    position: relative;
+    margin: var(--space-m) 0;
+}
+
+.form-group-name {
+    display: flex;
+    gap: var(--space-2xs);
+    margin-bottom: var(--space-2xs);
+    font-weight: 600;
+}
+
+.help-link {
+    flex-shrink: 0;
+    color: var(--grey600);
+    padding: var(--space-3xs);
+    margin: calc(-1 * var(--space-3xs));
+
+    &:hover {
+        color: var(--grey700);
+    }
+
+    svg {
+        width: 1em;
+        height: 1em;
+    }
+}
+
+.hidden-label {
+    composes: sr-only from '../../shared/a11y.module.css';
+}
+
+.form-group-error {
+    display: block;
+    color: red;
+    font-size: 0.9em;
+    margin-top: var(--space-2xs);
+}
+
+.buttons {
+    display: flex;
+    gap: var(--space-2xs);
+    flex-wrap: wrap;
+}
+
+.base-input {
+    padding: var(--space-2xs);
+    background-color: white;
+    border: 1px solid var(--gray-border);
+    border-radius: var(--space-3xs);
+
+    &[aria-invalid="true"] {
+        background: #fff2f2;
+        border-color: red;
+    }
+}
+
+.name-input {
+    composes: base-input;
+
+    max-width: 440px;
+    width: 100%;
+}
+
+.expiry-select {
+    composes: base-input;
+
+    padding-right: var(--space-m);
+    background-image: url("/assets/dropdown.svg");
+    background-repeat: no-repeat;
+    background-position: calc(100% - var(--space-2xs)) center;
+    background-size: 10px;
+    appearance: none;
+}
+
+.expiry-date-input {
+    composes: base-input;
+}
+
+.expiry-description {
+    margin-left: var(--space-2xs);
+    font-size: 0.9em;
+}
+
+.scopes-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    background-color: white;
+    border: 1px solid var(--gray-border);
+    border-radius: var(--space-3xs);
+
+    &.invalid {
+        background: #fff2f2;
+        border-color: red;
+    }
+
+    > * + * {
+        border-top: inherit;
+    }
+
+    label {
+        padding: var(--space-xs) var(--space-s);
+        display: flex;
+        flex-wrap: wrap;
+        gap: var(--space-xs);
+        font-size: 0.9em;
+    }
+}
+
+.scope-id {
+    display: inline-block;
+    max-width: 170px;
+    flex-grow: 1;
+    font-weight: bold;
+}
+
+.scope-description {
+    display: inline-block;
+}
+
+.crates-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    background-color: white;
+    border: 1px solid var(--gray-border);
+    border-radius: var(--space-3xs);
+
+    > * + * {
+        border-top: inherit;
+    }
+}
+
+.crates-unrestricted {
+    padding: var(--space-xs) var(--space-s);
+    font-size: 0.9em;
+}
+
+.crates-scope {
+    display: flex;
+
+    > div {
+        padding: var(--space-xs) var(--space-s);
+        display: flex;
+        flex-wrap: wrap;
+        gap: var(--space-xs);
+        font-size: 0.9em;
+        flex-grow: 1;
+    }
+
+    input {
+        margin: calc(-1 * var(--space-4xs)) 0;
+        padding: var(--space-3xs) var(--space-2xs);
+        border: 1px solid var(--gray-border);
+        border-radius: var(--space-3xs);
+    }
+
+    &.invalid input {
+        background: #fff2f2;
+        border-color: red;
+    }
+
+    > button {
+        margin: 0;
+        padding: 0 var(--space-xs);
+        border: none;
+        background: none;
+        cursor: pointer;
+        color: var(--grey700);
+        flex-shrink: 0;
+        display: flex;
+        align-items: center;
+
+        &:hover {
+            background: var(--grey200);
+            color: var(--grey900);
+        }
+
+        svg {
+            height: 1.1em;
+            width: 1.1em;
+        }
+    }
+
+    &:first-child button {
+        border-top-right-radius: var(--space-3xs);
+    }
+}
+
+.pattern-description {
+    flex-grow: 1;
+    align-self: center;
+
+    .invalid & {
+        color: red;
+    }
+
+    > span {
+        font-weight: bold;
+    }
+}
+
+.crates-pattern-button button {
+    padding: var(--space-xs) var(--space-s);
+    font-size: 0.9em;
+    width: 100%;
+    border: none;
+    background: none;
+    border-bottom-left-radius: var(--space-3xs);
+    border-bottom-right-radius: var(--space-3xs);
+    cursor: pointer;
+    font-weight: bold;
+
+    &:hover {
+        background: var(--grey200);
+    }
+}
+
+.generate-button {
+    composes: yellow-button small from '../../../styles/shared/buttons.module.css';
+    border-radius: 4px;
+
+    .spinner {
+        margin-left: var(--space-2xs);
+    }
+}
+
+.cancel-button {
+    composes: tan-button small from '../../../styles/shared/buttons.module.css';
+    border-radius: 4px;
+}

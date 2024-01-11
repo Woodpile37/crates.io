@@ -22,14 +22,26 @@ export default class Version extends Model {
   @attr license;
   @attr crate_size;
 
-  @belongsTo('crate', { async: false }) crate;
+  /**
+   * The minimum supported Rust version of this crate version.
+   * @type string | null
+   */
+  @attr rust_version;
 
-  @belongsTo('user', { async: false }) published_by;
-  @hasMany('dependency', { async: true }) dependencies;
-  @hasMany('version-download', { async: true }) version_downloads;
+  @belongsTo('crate', { async: false, inverse: 'versions' }) crate;
+
+  @belongsTo('user', { async: false, inverse: null }) published_by;
+  @hasMany('dependency', { async: true, inverse: 'version' }) dependencies;
+  @hasMany('version-download', { async: true, inverse: null }) version_downloads;
 
   get crateName() {
     return this.belongsTo('crate').id();
+  }
+
+  get msrv() {
+    let rustVersion = this.rust_version;
+    // add `.0` suffix if the `rust-version` field only has two version components
+    return /^[^.]+\.[^.]+$/.test(rustVersion) ? `${rustVersion}.0` : rustVersion;
   }
 
   get isNew() {
@@ -103,9 +115,9 @@ export default class Version extends Model {
     // trigger the async relationship to load the content
     let dependencies = await this.dependencies;
 
-    let normal = dependencies.filterBy('kind', 'normal').uniqBy('crate_id');
-    let build = dependencies.filterBy('kind', 'build').uniqBy('crate_id');
-    let dev = dependencies.filterBy('kind', 'dev').uniqBy('crate_id');
+    let normal = dependencies.filter(d => d.kind === 'normal');
+    let build = dependencies.filter(d => d.kind === 'build');
+    let dev = dependencies.filter(d => d.kind === 'dev');
 
     return { normal, build, dev };
   });
@@ -121,13 +133,13 @@ export default class Version extends Model {
     }
   });
 
-  loadDocsBuildsTask = task(async () => {
-    return await ajax(`https://docs.rs/crate/${this.crateName}/${this.num}/builds.json`);
+  loadDocsStatusTask = task(async () => {
+    return await ajax(`https://docs.rs/crate/${this.crateName}/=${this.num}/status.json`);
   });
 
   get hasDocsRsLink() {
-    let docsBuilds = this.loadDocsBuildsTask.lastSuccessful?.value;
-    return docsBuilds?.[0]?.build_status === true;
+    let docsStatus = this.loadDocsStatusTask.lastSuccessful?.value;
+    return docsStatus?.doc_status === true;
   }
 
   get docsRsLink() {

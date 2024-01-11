@@ -11,7 +11,7 @@ module('Mirage | GET /api/v1/crates/:id/reverse_dependencies', function (hooks) 
 
   test('returns 404 for unknown crates', async function (assert) {
     let response = await fetch('/api/v1/crates/foo/reverse_dependencies');
-    assert.equal(response.status, 404);
+    assert.strictEqual(response.status, 404);
     assert.deepEqual(await response.json(), { errors: [{ detail: 'Not Found' }] });
   });
 
@@ -19,7 +19,7 @@ module('Mirage | GET /api/v1/crates/:id/reverse_dependencies', function (hooks) 
     this.server.create('crate', { name: 'rand' });
 
     let response = await fetch('/api/v1/crates/rand/reverse_dependencies');
-    assert.equal(response.status, 200);
+    assert.strictEqual(response.status, 200);
     assert.deepEqual(await response.json(), {
       dependencies: [],
       versions: [],
@@ -47,7 +47,7 @@ module('Mirage | GET /api/v1/crates/:id/reverse_dependencies', function (hooks) 
     });
 
     let response = await fetch('/api/v1/crates/foo/reverse_dependencies');
-    assert.equal(response.status, 200);
+    assert.strictEqual(response.status, 200);
     assert.deepEqual(await response.json(), {
       dependencies: [
         {
@@ -89,6 +89,7 @@ module('Mirage | GET /api/v1/crates/:id/reverse_dependencies', function (hooks) 
           num: '1.0.0',
           published_by: null,
           readme_path: '/api/v1/crates/bar/1.0.0/readme',
+          rust_version: null,
           updated_at: '2017-02-24T12:34:56Z',
           yanked: false,
         },
@@ -107,6 +108,7 @@ module('Mirage | GET /api/v1/crates/:id/reverse_dependencies', function (hooks) 
           num: '1.0.1',
           published_by: null,
           readme_path: '/api/v1/crates/baz/1.0.1/readme',
+          rust_version: null,
           updated_at: '2017-02-24T12:34:56Z',
           yanked: false,
         },
@@ -129,12 +131,12 @@ module('Mirage | GET /api/v1/crates/:id/reverse_dependencies', function (hooks) 
     });
 
     let response = await fetch('/api/v1/crates/foo/reverse_dependencies');
-    assert.equal(response.status, 200);
+    assert.strictEqual(response.status, 200);
 
     let responsePayload = await response.json();
-    assert.equal(responsePayload.dependencies.length, 10);
-    assert.equal(responsePayload.versions.length, 10);
-    assert.equal(responsePayload.meta.total, 25);
+    assert.strictEqual(responsePayload.dependencies.length, 10);
+    assert.strictEqual(responsePayload.versions.length, 10);
+    assert.strictEqual(responsePayload.meta.total, 25);
   });
 
   test('supports `page` and `per_page` parameters', async function (assert) {
@@ -152,15 +154,15 @@ module('Mirage | GET /api/v1/crates/:id/reverse_dependencies', function (hooks) 
     });
 
     let response = await fetch('/api/v1/crates/foo/reverse_dependencies?page=2&per_page=5');
-    assert.equal(response.status, 200);
+    assert.strictEqual(response.status, 200);
 
     let responsePayload = await response.json();
-    assert.equal(responsePayload.dependencies.length, 5);
+    assert.strictEqual(responsePayload.dependencies.length, 5);
     assert.deepEqual(
       responsePayload.versions.map(it => it.crate),
       // offset by one because we created the `foo` crate first
       ['crate-07', 'crate-08', 'crate-09', 'crate-10', 'crate-11'],
     );
-    assert.equal(responsePayload.meta.total, 25);
+    assert.strictEqual(responsePayload.meta.total, 25);
   });
 });

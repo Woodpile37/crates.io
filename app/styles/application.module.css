@@ -21,7 +21,7 @@
     --yellow500: hsl(44, 100%, 60%);
     --yellow700: hsl(44, 67%, 50%);
 
-    --header-bg-color: hsl(115, 31%, 23%);
+    --header-bg-color: hsl(115, 31%, 20%);
 
     --transition-x-slow: 1000ms;
     --transition-slow: 500ms;
@@ -86,6 +86,7 @@
 
 html, body {
     margin: 0;
+    scroll-behavior: smooth;
 }
 
 body {
@@ -142,6 +143,22 @@ noscript {
     color: white;
 }
 
+/* see https://github.com/twbs/bootstrap/pull/30269 */
+::-webkit-datetime-edit,
+::-webkit-datetime-edit-fields-wrapper,
+::-webkit-datetime-edit-text,
+::-webkit-datetime-edit-minute,
+::-webkit-datetime-edit-hour-field,
+::-webkit-datetime-edit-day-field,
+::-webkit-datetime-edit-month-field,
+::-webkit-datetime-edit-year-field {
+    padding: 0;
+}
+
+::-webkit-calendar-picker-indicator {
+    font-size: 0.9em
+}
+
 :global {
     .c-notification__icon {
         display: flex;
@@ -179,4 +196,8 @@ noscript {
     display: flex;
     flex-direction: column;
     padding: var(--main-layout-padding);
+}
+
+:global(.ember-tooltip) {
+    font-weight: normal;
 }

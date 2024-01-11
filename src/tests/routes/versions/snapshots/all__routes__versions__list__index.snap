@@ -1,0 +1,7 @@
+---
+source: src/tests/routes/versions/list.rs
+expression: json
+---
+{
+  "versions": []
+}

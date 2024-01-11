@@ -1,7 +1,6 @@
 'use strict';
 
 const EmberApp = require('ember-cli/lib/broccoli/ember-app');
-const postcssCustomMedia = require('postcss-custom-media');
 
 module.exports = function (defaults) {
   let env = EmberApp.env();
@@ -26,7 +25,10 @@ module.exports = function (defaults) {
       },
     },
     babel: {
-      plugins: [require.resolve('ember-auto-import/babel-plugin')],
+      plugins: [
+        require.resolve('ember-auto-import/babel-plugin'),
+        ...require('ember-cli-code-coverage').buildBabelPlugin({ embroider: true }),
+      ],
     },
 
     'ember-cli-babel': {
@@ -41,11 +43,6 @@ module.exports = function (defaults) {
       extension: 'module.css',
       plugins: {
         before: [require('postcss-nested')],
-        after: [
-          postcssCustomMedia({
-            importFrom: `${__dirname}/app/styles/breakpoints.css`,
-          }),
-        ],
       },
     },
     fingerprint: {
@@ -63,15 +60,37 @@ module.exports = function (defaults) {
 
   const { Webpack } = require('@embroider/webpack');
   return require('@embroider/compat').compatBuild(app, Webpack, {
+    staticAddonTrees: true,
     staticAddonTestSupportTrees: true,
     staticModifiers: true,
     packagerOptions: {
       webpackConfig: {
         resolve: {
-          // disables `crypto` import warning in `axe-core`
-          fallback: { crypto: false },
+          fallback: {
+            // disables `crypto` import warning in `axe-core`
+            crypto: false,
+            // disables `timers` import warning in `@sinon/fake-timers`
+            timers: false,
+          },
         },
       },
     },
+    packageRules: [
+      // see https://github.com/embroider-build/embroider/issues/1322
+      {
+        package: '@ember-data/store',
+        addonModules: {
+          '-private.js': {
+            dependsOnModules: [],
+          },
+          '-private/system/core-store.js': {
+            dependsOnModules: [],
+          },
+          '-private/system/model/internal-model.js': {
+            dependsOnModules: [],
+          },
+        },
+      },
+    ],
   });
 };

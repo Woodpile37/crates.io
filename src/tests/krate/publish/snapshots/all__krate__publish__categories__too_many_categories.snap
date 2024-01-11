@@ -1,0 +1,11 @@
+---
+source: src/tests/krate/publish/categories.rs
+expression: response.into_json()
+---
+{
+  "errors": [
+    {
+      "detail": "expected at most 5 categories per crate"
+    }
+  ]
+}

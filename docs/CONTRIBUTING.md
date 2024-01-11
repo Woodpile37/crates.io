@@ -1,12 +1,12 @@
-# Contributing to Crates.io
+# Contributing to crates.io
 
 ## Attending the weekly team meetings
 
 Each Friday at 11:00am US east coast time the crates.io team gets together
-on Zoom or [Discord] (`#crates-io-team`) for our weekly team meeting and we invite
+on Zoom or [Zulip] (`#t-crates-io`) for our weekly team meeting, and we invite
 everyone who wants to contribute to crates.io to participate.
 
-[Discord]: https://discord.gg/rust-lang
+[Zulip]: https://rust-lang.zulipchat.com/#narrow/stream/318791-t-crates-io/
 
 ## Finding an issue to work on
 
@@ -76,7 +76,7 @@ up git](https://help.github.com/articles/set-up-git/), and once you've done
 that, you should be able to clone the repo and change into the repo's directory
 from your terminal:
 
-```
+```console
 git clone https://github.com/rust-lang/crates.io.git
 cd crates.io/
 ```
@@ -104,8 +104,8 @@ as well.
 
 In order to run the frontend on Windows and macOS, you will need to have installed:
 
-- [node](https://nodejs.org/en/) >= 16.15.0 (see `package.json` and `.github/workflows/ci.yml` for what we currently use)
-- [pnpm](https://pnpm.io)
+- [node](https://nodejs.org/en/) >= 18.16.0 (see `package.json` and `.github/workflows/ci.yml` for what we currently use)
+- [pnpm](https://pnpm.io) >= 8.5.1
 
 Follow the links for each of these tools for their recommended installation
 instructions. If you already have these tools, or you have a different
@@ -121,7 +121,7 @@ into any trouble.
 
 To install the npm packages that crates.io uses, run:
 
-```
+```console
 pnpm install
 ```
 
@@ -130,17 +130,17 @@ libraries that crates.io uses change. Usually you'll know they've changed
 because you'll run the next step and it will fail saying it can't find some
 libraries.
 
-To build and serve the frontend assets, use the command `yarn start`. There
+To build and serve the frontend assets, use the command `pnpm start`. There
 are variations on this command that change which backend your frontend tries to
 talk to:
 
-| Command                                   | Backend | Use case |
-|-------------------------------------------|---------|----------|
-| `pnpm start:live`                         | https://crates.io | Testing UI changes with the full live site's data |
-| `pnpm start:staging`                      | https://staging-crates-io.herokuapp.com | Testing UI changes with a smaller set of realistic data |
-| `pnpm start`                              | Static fixture test data in `mirage/fixtures` | Setting up particular situations, see note |
-| `pnpm start:local`                        | Backend server running locally | See the Working on the backend section for setup |
-| `pnpm start -- --proxy https://crates.io` | Whatever is specified in `--proxy` arg | If your use case is not covered here |
+| Command                                      | Backend                                                           | Use case                                                |
+| -------------------------------------------- | ----------------------------------------------------------------- | ------------------------------------------------------- |
+| `pnpm start:live`                            | <https://crates.io>                                               | Testing UI changes with the full live site's data       |
+| `pnpm start:staging`                         | <https://staging-crates-io.herokuapp.com>                         | Testing UI changes with a smaller set of realistic data |
+| `pnpm start`                                 | Static fixture test data in `mirage/fixtures`                     | Setting up particular situations, see note              |
+| `pnpm start:local`                           | Backend server running locally                                    | See the Working on the backend section for setup        |
+| `PROXY_BACKEND=https://crates.io pnpm start` | Whatever is specified in the `PROXY_BACKEND` environment variable | If your use case is not covered here                    |
 
 > Note: If you want to set up a particular situation, you can edit the fixture
 > data used for tests in `mirage/fixtures`. The fixture data does not currently
@@ -151,7 +151,7 @@ talk to:
 
 You can run the frontend tests with:
 
-```
+```console
 pnpm test
 ```
 
@@ -161,10 +161,10 @@ pnpm test
 
 In order to run the backend, you will need to have installed:
 
-- [Rust](https://www.rust-lang.org/en-US/) stable >= 1.16.0 and cargo, which comes with Rust
+- [Rust](https://www.rust-lang.org/en-US/) stable >= 1.56.0 and cargo, which comes with Rust
 - [Postgres](https://www.postgresql.org/) >= 9.5
 - [OpenSSL](https://www.openssl.org/) >= 1.0.2k
-- [diesel_cli](http://diesel.rs/guides/getting-started/) >= 1.2.0 and < 2.0.0
+- [diesel_cli](http://diesel.rs/guides/getting-started/) >= 2.0.0 and < 3.0.0
 
 ##### Rust
 
@@ -179,10 +179,10 @@ methods we'd recommend for each operating system:
 - Windows: use the [Windows installers recommended by
   Postgres](https://www.postgresql.org/download/windows/)
 - macOS: Either [Postgres.app](https://postgresapp.com/) or through
-  [Homebrew](https://brew.sh/) by running `brew install postgresql` and
+  [Homebrew](https://brew.sh/) by running `brew install postgresql@13` and
   following the post-installation instructions
 - Linux: Postgres is generally available in the distribution repositories as
-  `postgresql` or `postgresql-server`. You will also need the developer package 
+  `postgresql` or `postgresql-server`. You will also need the developer package
   (known either as `postgresql-devel` or `libpq-dev`),
   as well as `postgresql-contrib`. Here
   are some examples of installation commands that have been tested for the
@@ -192,13 +192,13 @@ methods we'd recommend for each operating system:
   - Fedora: `sudo dnf install postgresql-server postgresql-contrib postgresql-devel pkgconfig`
 
   > If you're missing a package, when you try to `cargo install` or `cargo
-  > build` later, you'll get an error that looks like this:
+build` later, you'll get an error that looks like this:
   >
-  >     ```
-  >     error: linking with `cc` failed: exit code: 1
-  >     [lots of output]
-  >     = note: /usr/bin/ld: cannot find -l[something]
-  >     ```
+  > ```text
+  > error: linking with `cc` failed: exit code: 1
+  > [lots of output]
+  > = note: /usr/bin/ld: cannot find -l[something]
+  > ```
   >
   > That `[something]` is what you're missing; you'll need to do some research
   > to figure out what package will get you the missing library.
@@ -208,45 +208,46 @@ by typing `\q`) without any errors to connect to your running Postgres server.
 
 > If you see an error that looks like this:
 >
-> ```
+> ```text
 > psql: could not connect to server: No such file or directory
 > Is the server running locally and accepting
-> connections on Unix domain socket "/var/run/postgresql/.s.PGSQL.5432"?  
+> connections on Unix domain socket "/var/run/postgresql/.s.PGSQL.5432"?
 > ```
+>
 > You may need to start the postgreql server on your system. On a Linux system,
 > you can start it with this command:
 >
-> ```
+> ```console
 > sudo service postgresql start
 > ```
-
+>
 > Depending on your system, its permissions, and how Postgres was installed, you
 > may need to use the `postgres` user for some operations (by using `sudo su -
-> postgres`). Generally, the problem is that by default the postgres server is
+postgres`). Generally, the problem is that by default the postgres server is
 > only set up to allow connections by the `postrges` user. You'll know if you're
 > in this situation because if you try to run `psql` as yourself, you'll get
 > this error:
 >
-> ```
+> ```text
 > psql: FATAL:  role "yourusername" does not exist
 > ```
 >
 > One way of fixing this is to first give yourself superuser permissions in the
 > database by running this and replacing `[yourusername]` with your username:
 >
-> ```
+> ```console
 > sudo -u postgres createuser --superuser [yourusername]
 > ```
 >
 > Next, if you try to run `psql` and get this error:
 >
-> ```
+> ```text
 > psql: FATAL:  database "yourusername" does not exist
 > ```
 >
 > Fix that by creating a template database for yourself:
 >
-> ```
+> ```console
 > createdb [yourusername]
 > ```
 >
@@ -284,15 +285,15 @@ by typing `\q`) without any errors to connect to your running Postgres server.
 
 On all platforms, install through `cargo` by running:
 
-```
-cargo install diesel_cli --no-default-features --features postgres --version 1
+```console
+cargo install diesel_cli --no-default-features --features postgres --version ^2
 ```
 
 This will install a binary named `diesel`, so you should be able to run `diesel
 --version` to confirm successful installation.
 
-> If you're on Linux and this fails with an error that looks like `error:
-> linking with `cc` failed: exit code: 1`, you're probably missing some
+> If you're on Linux and this fails with an error that looks like ``error:
+linking with `cc` failed: exit code: 1``, you're probably missing some
 > Postgres related libraries. See the Postgres section above on how to fix this.
 
 #### Building and serving the backend
@@ -306,7 +307,7 @@ Try using `postgres://postgres@localhost/cargo_registry` first.
 > If that doesn't work, change this by filling in this template with the
 > appropriate values where there are `[]`s:
 >
-> ```
+> ```text
 > postgres://[postgresuser]:[password]@[localhost]:[5432]/[database_name]
 > ```
 >
@@ -320,13 +321,12 @@ Try using `postgres://postgres@localhost/cargo_registry` first.
 > - Replace `[database_name]` with the name of the database you'd like to use.
 >   We're going to create a database named `cargo_registry` in the next
 >   section; change this if you'd like to name it something else.
-
-
+>
 > If you receive an error that looks like:
 >
-> ```
-> password authentication failed for user \"postgres\"\nFATAL:  
-> password authentication failed for user \"postgres\"\n"` 
+> ```text
+> password authentication failed for user \"postgres\"\nFATAL:
+> password authentication failed for user \"postgres\"\n"`
 > ```
 >
 > You may need to update the pg_hba.conf file on your development workstation.
@@ -341,13 +341,13 @@ named `cargo_registry`.
 
 Create a new database by running:
 
-```
+```console
 createdb cargo_registry
 ```
 
 Then run the migrations:
 
-```
+```console
 diesel migration run
 ```
 
@@ -355,7 +355,7 @@ diesel migration run
 
 Set up the git repo for the crate index by running:
 
-```
+```console
 ./script/init-local-index.sh
 ```
 
@@ -364,13 +364,13 @@ Set up the git repo for the crate index by running:
 Build and start the server by running this command (you'll need to stop this
 with `CTRL-C` and rerun this command every time you change the backend code):
 
-```
+```console
 cargo run
 ```
 
 Then start the background worker (which will process uploaded READMEs):
 
-```
+```console
 cargo run --bin background-worker
 ```
 
@@ -379,11 +379,11 @@ terminal session (the frontend picks up frontend changes using live reload
 without a restart needed, and you can leave the frontend running while you
 restart the server):
 
-```
+```console
 pnpm start:local
 ```
 
-And then you should be able to visit http://localhost:4200!
+And then you should be able to visit <http://localhost:4200>!
 
 ##### Using Mailgun to Send Emails
 
@@ -400,11 +400,12 @@ Subject: Please confirm your email address
 Content-Transfer-Encoding: 7bit
 Date: Thu, 24 Jun 2021 08:02:23 -0000
 
-Hello hi-rustin! Welcome to Crates.io. Please click the
+Hello hi-rustin! Welcome to crates.io. Please click the
 link below to verify your email address. Thank you!
 
 https://crates.io/confirm/RiphVyFo31wuKQhpyTw7RF2LIf
 ```
+
 When verifying the email, you need to change the prefix to your frontend host.
 For example, change the above link to `http://localhost:4200/confirm/RiphVyFo31wuKQhpyTw7RF2LIf`.
 
@@ -434,13 +435,15 @@ dashboard, which should take you to your Mailgun dashboard.
 #### Running the backend tests
 
 In your `.env` file, set `TEST_DATABASE_URL` to a value that's the same as
-`DATABASE_URL` except with a different database name at the end, since
-everything in the test database will be deleted every time you run tests. Try
-using `postgres://postgres@localhost/cargo_registry_test`.
+`DATABASE_URL`, or use a different database name. The `TEST_DATABASE_URL`
+connection will be used to create new databases for the tests, with names
+prefixed with the database name from `TEST_DATABASE_URL`.
+
+Example: `postgres://postgres@localhost/cargo_registry_test`.
 
 Create the test database by running:
 
-```
+```console
 createdb cargo_registry_test
 ```
 
@@ -448,13 +451,13 @@ The test harness will ensure that migrations are run.
 
 Run the backend API server tests with this command:
 
-```
+```console
 cargo test
 ```
 
 #### Using your local crates.io with cargo
 
-Once you have a local instance of crates.io running at http://localhost:4200 by
+Once you have a local instance of crates.io running at <http://localhost:4200> by
 following the instructions in the "Working on the Backend" section, you can go
 to another Rust project and tell cargo to use your local crates.io instead of
 production.
@@ -480,7 +483,7 @@ them as the values of the `GH_CLIENT_ID` and `GH_CLIENT_SECRET` in your `.env`.
 Then restart your backend, and you should be able to log in to your local
 crates.io with your GitHub account.
 
-Go to http://localhost:4200/me to get your API token and run the `cargo login`
+Go to <http://localhost:4200/me> to get your API token and run the `cargo login`
 command as directed.
 
 Now you should be able to go to the directory of a crate that has no
@@ -491,7 +494,7 @@ live crates.io, you won't be able to publish that crate locally.
 
 In your crate directory, run:
 
-```
+```console
 cargo publish --index file:///path/to/your/crates.io/tmp/index-bare --token $YOUR_TOKEN
 ```
 
@@ -504,19 +507,19 @@ that `./script/init-local-index.sh` set up.
 Note that when you're running crates.io in development mode without the S3
 variables set (which is what we've done in these setup steps), the crate files
 will be stored in `local_uploads/crates` and served from there when a
-crate is downloaded.  If you try to install a crate from your local crates.io and
+crate is downloaded. If you try to install a crate from your local crates.io and
 `cargo` can't find the crate files, it is probably because this directory does not
 exist.
 
 ##### Downloading a crate from your local crates.io
 
-In *another* crate, you can use the crate you've published as a dependency by
+In _another_ crate, you can use the crate you've published as a dependency by
 telling `cargo` to replace crates.io with your local crates.io as a source.
 
 In this other crate's directory, create a `.cargo/config` file with this
 content:
 
-```
+```toml
 [source]
 
 [source.mirror]
@@ -529,7 +532,7 @@ replace-with = "mirror"
 Then add the crate you published to your local crates.io as a dependency in
 this crate's `Cargo.toml`, and `cargo build` should display output like this:
 
-```
+```console
     Updating registry `file:///path/to/your/crates.io/tmp/index-bare`
  Downloading yourcrate v0.1.0 (registry file:///path/to/your/crates.io/tmp/index-bare)
    Compiling yourcrate v0.1.0
@@ -544,8 +547,8 @@ There are Dockerfiles to build both the backend and the frontend,
 useful to just use docker-compose to bring up everything that's needed all in
 one go:
 
-```
-docker-compose up -d
+```console
+docker compose up -d
 ```
 
 The Compose file is filled out with a sane set of defaults that should Just
@@ -555,7 +558,7 @@ For example, in order to specify a set of Github OAuth Client credentials, a
 `docker-compose.override.yml` file might look like this:
 
 ```yaml
-version: "3"
+version: '3'
 services:
   backend:
     environment:
@@ -564,15 +567,15 @@ services:
 ```
 
 These environment variables can also be defined in a local `.env` file, see `.env.sample`
-for various configuration options. 
+for various configuration options.
 
 #### Accessing services
 
 By default, the services will be exposed on their normal ports:
 
-* `5432` for Postgres
-* `8888` for the crates.io backend
-* `4200` for the crates.io frontend
+- `5432` for Postgres
+- `8888` for the crates.io backend
+- `4200` for the crates.io frontend
 
 These can be changed with the `docker-compose.override.yml` file.
 
@@ -581,8 +584,8 @@ These can be changed with the `docker-compose.override.yml` file.
 Unlike a local setup, the Git index is not stored in the `./tmp` folder, so in
 order to publish to the Dockerized crates.io, run
 
-```
-cargo publish --index http://localhost:4200/git/index --token $YOUR_TOKEN
+```console
+cargo publish --index http://localhost:8888/git/index --token $YOUR_TOKEN
 ```
 
 #### Changing code
@@ -592,34 +595,34 @@ which means that the Ember live-reload server will still just work. If
 anything outside of `app/` is changed, the base Docker image will have to be
 rebuilt:
 
-```sh
+```console
 # Rebuild frontend Docker image
-docker-compose build frontend
+docker compose build frontend
 
 # Restart running frontend container (if it's already running)
-docker-compose stop frontend
-docker-compose rm frontend
-docker-compose up -d
+docker compose stop frontend
+docker compose rm frontend
+docker compose up -d
 ```
 
 Similarly, the `src/` directory is mounted into the backend Docker container,
 so in order to recompile the backend, run:
 
-```
-docker-compose restart backend
+```console
+docker compose restart backend
 ```
 
 If anything outside of `src/` is changed, the base Docker image will have to be
 rebuilt:
 
-```sh
+```console
 # Rebuild backend Docker image
-docker-compose build backend
+docker compose build backend
 
 # Restart running backend container (if it's already running)
-docker-compose stop backend
-docker-compose rm backend
-docker-compose up -d
+docker compose stop backend
+docker compose rm backend
+docker compose up -d
 ```
 
 #### Volumes

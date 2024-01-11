@@ -1,41 +1,39 @@
-#![warn(clippy::all, rust_2018_idioms)]
+#[macro_use]
+extern crate tracing;
 
-use cargo_registry::{env_optional, metrics::LogEncoder, util::errors::AppResult, App, Env};
-use std::{env, fs::File, process::Command, sync::Arc, time::Duration};
+use crates_io::middleware::normalize_path::normalize_path;
+use crates_io::{metrics::LogEncoder, App, Emails};
+use std::{sync::Arc, time::Duration};
 
-use conduit_hyper::Service;
-use futures_util::future::FutureExt;
+use axum::ServiceExt;
+use crates_io_github::RealGitHubClient;
 use prometheus::Encoder;
-use reqwest::blocking::Client;
-use std::io::{self, Write};
-use tokio::io::AsyncWriteExt;
+use reqwest::Client;
+use std::io::Write;
+use std::net::SocketAddr;
+use tokio::net::TcpListener;
 use tokio::signal::unix::{signal, SignalKind};
-use tracing::Level;
-use tracing_subscriber::{filter, prelude::*};
+use tower::Layer;
 
 const CORE_THREADS: usize = 4;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let _sentry = cargo_registry::sentry::init();
+fn main() -> anyhow::Result<()> {
+    let _sentry = crates_io::sentry::init();
 
     // Initialize logging
+    crates_io::util::tracing::init();
 
-    let log_filter = env::var("RUST_LOG")
-        .unwrap_or_default()
-        .parse::<filter::Targets>()
-        .expect("Invalid RUST_LOG value");
+    let _span = info_span!("server.run");
 
-    let sentry_filter = filter::Targets::new().with_default(Level::INFO);
+    let config = crates_io::config::Server::from_environment()?;
 
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer().with_filter(log_filter))
-        .with(sentry::integrations::tracing::layer().with_filter(sentry_filter))
-        .init();
+    let emails = Emails::from_environment(&config);
 
-    let config = cargo_registry::config::Server::default();
-    let env = config.env();
     let client = Client::new();
-    let app = Arc::new(App::new(config, Some(client)));
+    let github = RealGitHubClient::new(client);
+    let github = Box::new(github);
+
+    let app = Arc::new(App::new(config, emails, github));
 
     // Start the background thread periodically persisting download counts to the database.
     downloads_counter_thread(app.clone());
@@ -43,138 +41,103 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Start the background thread periodically logging instance metrics.
     log_instance_metrics_thread(app.clone());
 
-    let handler = cargo_registry::build_handler(app.clone());
+    let axum_router = crates_io::build_handler(app.clone());
 
-    let heroku = dotenv::var("HEROKU").is_ok();
-    let fastboot = dotenv::var("USE_FASTBOOT").is_ok();
-    let dev_docker = dotenv::var("DEV_DOCKER").is_ok();
+    // Apply the `normalize_path` middleware around the axum router.
+    //
+    // See https://docs.rs/axum/0.7.2/axum/middleware/index.html#rewriting-request-uri-in-middleware.
+    let normalize_path = axum::middleware::from_fn(normalize_path);
+    let axum_router = normalize_path.layer(axum_router);
 
-    let ip = if dev_docker {
-        [0, 0, 0, 0]
-    } else {
-        [127, 0, 0, 1]
-    };
-    let port = match (heroku, env_optional("PORT")) {
-        (false, Some(port)) => port,
-        _ => 8888,
-    };
-
-    let threads = dotenv::var("SERVER_THREADS")
-        .map(|s| s.parse().expect("SERVER_THREADS was not a valid number"))
-        .unwrap_or_else(|_| match env {
-            Env::Development => 5,
-            // A large default because this can be easily changed via env and in production we
-            // want the logging middleware to accurately record the start time.
-            _ => 500,
-        });
-
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .worker_threads(CORE_THREADS)
-        .max_blocking_threads(threads as usize)
-        .build()
-        .unwrap();
-
-    let handler = Arc::new(conduit_hyper::BlockingHandler::new(handler));
-    let make_service =
-        hyper::service::make_service_fn(move |socket: &hyper::server::conn::AddrStream| {
-            let addr = socket.remote_addr();
-            let handler = handler.clone();
-            async move { Service::from_blocking(handler, addr) }
-        });
-
-    let (addr, server) = rt.block_on(async {
-        let server = hyper::Server::bind(&(ip, port).into()).serve(make_service);
-
-        // When the user configures PORT=0 the operating system will allocate a random unused port.
-        // This fetches that random port and uses it to display the the correct url later.
-        let addr = server.local_addr();
-
-        let mut sig_int = signal(SignalKind::interrupt())?;
-        let mut sig_term = signal(SignalKind::terminate())?;
-        let server = server.with_graceful_shutdown(async move {
-            // Wait for either signal
-            tokio::select! {
-                _ = sig_int.recv().fuse() => {},
-                _ = sig_term.recv().fuse() => {},
-            };
-            tokio::io::stdout()
-                .write_all(b"Starting graceful shutdown\n")
-                .await
-                .ok();
-        });
-
-        Ok::<_, io::Error>((addr, server))
-    })?;
-
-    // Do not change this line! Removing the line or changing its contents in any way will break
-    // the test suite :)
-    println!("Listening at http://{addr}");
-
-    // Creating this file tells heroku to tell nginx that the application is ready
-    // to receive traffic.
-    if heroku {
-        let path = if fastboot {
-            "/tmp/backend-initialized"
-        } else {
-            "/tmp/app-initialized"
-        };
-        println!("Writing to {path}");
-        File::create(path).unwrap();
-
-        // Launch nginx via the Heroku nginx buildpack
-        // `wait()` is never called on the child process, but it should be okay to leave a zombie
-        // process around on shutdown when Heroku is tearing down the entire container anyway.
-        Command::new("./script/start-web.sh")
-            .spawn()
-            .expect("Couldn't spawn nginx");
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all();
+    builder.worker_threads(CORE_THREADS);
+    if let Some(threads) = app.config.max_blocking_threads {
+        builder.max_blocking_threads(threads);
     }
+
+    let rt = builder.build().unwrap();
+
+    let make_service = axum_router.into_make_service_with_connect_info::<SocketAddr>();
 
     // Block the main thread until the server has shutdown
-    rt.block_on(server)?;
+    rt.block_on(async {
+        // Create a `TcpListener` using tokio.
+        let listener = TcpListener::bind((app.config.ip, app.config.port)).await?;
 
-    println!("Persisting remaining downloads counters");
+        let addr = listener.local_addr()?;
+
+        // Do not change this line! Removing the line or changing its contents in any way will break
+        // the test suite :)
+        info!("Listening at http://{addr}");
+
+        // Run the server with graceful shutdown
+        axum::serve(listener, make_service)
+            .with_graceful_shutdown(shutdown_signal())
+            .await
+    })?;
+
+    info!("Persisting remaining downloads counters");
     match app.downloads_counter.persist_all_shards(&app) {
         Ok(stats) => stats.log(),
-        Err(err) => println!("downloads_counter error: {err}"),
+        Err(err) => error!(?err, "downloads_counter error"),
     }
 
-    println!("Server has gracefully shutdown!");
+    info!("Server has gracefully shutdown!");
     Ok(())
 }
 
+async fn shutdown_signal() {
+    let interrupt = async {
+        signal(SignalKind::interrupt())
+            .expect("failed to install signal handler")
+            .recv()
+            .await;
+    };
+
+    let terminate = async {
+        signal(SignalKind::terminate())
+            .expect("failed to install signal handler")
+            .recv()
+            .await;
+    };
+
+    tokio::select! {
+        _ = interrupt => {},
+        _ = terminate => {},
+    }
+}
+
 fn downloads_counter_thread(app: Arc<App>) {
-    let interval = Duration::from_millis(
-        (app.config.downloads_persist_interval_ms / app.downloads_counter.shards_count()) as u64,
-    );
+    let interval =
+        app.config.downloads_persist_interval / app.downloads_counter.shards_count() as u32;
 
     std::thread::spawn(move || loop {
         std::thread::sleep(interval);
 
         match app.downloads_counter.persist_next_shard(&app) {
             Ok(stats) => stats.log(),
-            Err(err) => println!("downloads_counter error: {err}"),
+            Err(err) => error!(?err, "downloads_counter error"),
         }
     });
 }
 
 fn log_instance_metrics_thread(app: Arc<App>) {
     // Only run the thread if the configuration is provided
-    let interval = if let Some(secs) = app.config.instance_metrics_log_every_seconds {
-        Duration::from_secs(secs)
-    } else {
-        return;
+    let interval = match app.config.instance_metrics_log_every_seconds {
+        Some(secs) => Duration::from_secs(secs),
+        None => return,
     };
 
     std::thread::spawn(move || loop {
         if let Err(err) = log_instance_metrics_inner(&app) {
-            eprintln!("log_instance_metrics error: {err}");
+            error!(?err, "log_instance_metrics error");
         }
         std::thread::sleep(interval);
     });
 }
 
-fn log_instance_metrics_inner(app: &App) -> AppResult<()> {
+fn log_instance_metrics_inner(app: &App) -> anyhow::Result<()> {
     let families = app.instance_metrics.gather(app)?;
 
     let mut stdout = std::io::stdout();

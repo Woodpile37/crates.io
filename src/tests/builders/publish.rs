@@ -1,109 +1,57 @@
-use cargo_registry::views::krate_publish as u;
-use std::{collections::BTreeMap, collections::HashMap, io::Read};
+use bytes::{BufMut, Bytes, BytesMut};
+use cargo_manifest::{DependencyDetail, DepsSet, MaybeInherited};
+use crates_io::models::DependencyKind;
+use crates_io::views::krate_publish as u;
+use std::collections::BTreeMap;
 
-use flate2::{write::GzEncoder, Compression};
-use once_cell::sync::Lazy;
+use crates_io_tarball::TarballBuilder;
 
 use super::DependencyBuilder;
-
-// The bytes of an empty tarball is not an empty vector of bytes because of tarball headers.
-// Unless files are added to a PublishBuilder, the `.crate` tarball that gets uploaded
-// will be empty, so precompute the empty tarball bytes to use as a default.
-static EMPTY_TARBALL_BYTES: Lazy<Vec<u8>> = Lazy::new(generate_empty_tarball);
-
-fn generate_empty_tarball() -> Vec<u8> {
-    let mut empty_tarball = vec![];
-    {
-        let mut ar = tar::Builder::new(GzEncoder::new(&mut empty_tarball, Compression::default()));
-        assert_ok!(ar.finish());
-    }
-    empty_tarball
-}
 
 /// A builder for constructing a crate for the purposes of testing publishing. If you only need
 /// a crate to exist and don't need to test behavior caused by the publish request, inserting
 /// a crate into the database directly by using CrateBuilder will be faster.
 pub struct PublishBuilder {
-    badges: HashMap<String, HashMap<String, String>>,
     categories: Vec<String>,
     deps: Vec<u::EncodableCrateDependency>,
     desc: Option<String>,
     doc_url: Option<String>,
+    files: Vec<(String, Bytes)>,
     keywords: Vec<String>,
-    pub krate_name: String,
+    krate_name: String,
     license: Option<String>,
     license_file: Option<String>,
+    manifest: Manifest,
     readme: Option<String>,
-    tarball: Vec<u8>,
     version: semver::Version,
-    features: BTreeMap<u::EncodableFeatureName, Vec<u::EncodableFeature>>,
+    features: BTreeMap<String, Vec<String>>,
+}
+
+enum Manifest {
+    None,
+    Generated,
+    Custom(Bytes),
 }
 
 impl PublishBuilder {
-    /// Create a request to publish a crate with the given name, version 1.0.0, and no files
+    /// Create a request to publish a crate with the given name and version, and no files
     /// in its tarball.
-    pub fn new(krate_name: &str) -> Self {
+    pub fn new(krate_name: &str, version: &str) -> Self {
         PublishBuilder {
-            badges: HashMap::new(),
             categories: vec![],
             deps: vec![],
             desc: Some("description".to_string()),
             doc_url: None,
+            files: vec![],
             keywords: vec![],
             krate_name: krate_name.into(),
             license: Some("MIT".to_string()),
             license_file: None,
+            manifest: Manifest::Generated,
             readme: None,
-            tarball: EMPTY_TARBALL_BYTES.to_vec(),
-            version: semver::Version::parse("1.0.0").unwrap(),
+            version: semver::Version::parse(version).unwrap(),
             features: BTreeMap::new(),
         }
-    }
-
-    /// Set the version of the crate being published to something other than the default of 1.0.0.
-    pub fn version(mut self, version: &str) -> Self {
-        self.version = semver::Version::parse(version).unwrap();
-        self
-    }
-
-    /// Set the files in the crate's tarball.
-    pub fn files(self, files: &[(&str, &[u8])]) -> Self {
-        let mut slices = files.iter().map(|p| p.1).collect::<Vec<_>>();
-        let mut files = files
-            .iter()
-            .zip(&mut slices)
-            .map(|(&(name, _), data)| {
-                let len = data.len() as u64;
-                (name, data as &mut dyn Read, len)
-            })
-            .collect::<Vec<_>>();
-
-        self.files_with_io(&mut files)
-    }
-
-    /// Set the tarball from a Read trait object
-    pub fn files_with_io(mut self, files: &mut [(&str, &mut dyn Read, u64)]) -> Self {
-        let mut tarball = Vec::new();
-        {
-            let mut ar = tar::Builder::new(GzEncoder::new(&mut tarball, Compression::default()));
-            for &mut (name, ref mut data, size) in files {
-                let mut header = tar::Header::new_gnu();
-                assert_ok!(header.set_path(name));
-                header.set_size(size);
-                header.set_cksum();
-                assert_ok!(ar.append(&header, data));
-            }
-            assert_ok!(ar.finish());
-        }
-
-        self.tarball = tarball;
-        self
-    }
-
-    /// Set the tarball directly to the given Vec of bytes
-    pub fn tarball(mut self, tarball: Vec<u8>) -> Self {
-        self.tarball = tarball;
-        self
     }
 
     /// Add a dependency to this crate. Make sure the dependency already exists in the
@@ -150,9 +98,9 @@ impl PublishBuilder {
         self
     }
 
-    /// Add badges to this crate.
-    pub fn badges(mut self, badges: HashMap<String, HashMap<String, String>>) -> Self {
-        self.badges = badges;
+    /// Set the license from this crate.
+    pub fn license<T: Into<String>>(mut self, license: T) -> Self {
+        self.license = Some(license.into());
         self
     }
 
@@ -170,72 +118,170 @@ impl PublishBuilder {
 
     // Adds a feature.
     pub fn feature(mut self, name: &str, values: &[&str]) -> Self {
-        let values = values
-            .iter()
-            .map(|s| u::EncodableFeature(s.to_string()))
-            .collect();
-        self.features
-            .insert(u::EncodableFeatureName(name.to_string()), values);
+        let values = values.iter().map(ToString::to_string).collect();
+        self.features.insert(name.to_string(), values);
+        self
+    }
+
+    pub fn no_manifest(mut self) -> Self {
+        self.manifest = Manifest::None;
+        self
+    }
+
+    pub fn custom_manifest(mut self, manifest: impl Into<Bytes>) -> Self {
+        self.manifest = Manifest::Custom(manifest.into());
+        self
+    }
+
+    pub fn add_file(mut self, path: impl ToString, content: impl Into<Bytes>) -> Self {
+        self.files.push((path.to_string(), content.into()));
         self
     }
 
     pub fn build(self) -> (String, Vec<u8>) {
-        let new_crate = u::EncodableCrateUpload {
-            name: u::EncodableCrateName(self.krate_name.clone()),
-            vers: u::EncodableCrateVersion(self.version),
-            features: self.features,
-            deps: self.deps,
-            description: self.desc,
-            homepage: None,
-            documentation: self.doc_url,
+        let metadata = u::PublishMetadata {
+            name: self.krate_name.clone(),
+            vers: self.version.to_string(),
             readme: self.readme,
             readme_file: None,
-            keywords: u::EncodableKeywordList(
-                self.keywords.into_iter().map(u::EncodableKeyword).collect(),
-            ),
-            categories: u::EncodableCategoryList(
-                self.categories
-                    .into_iter()
-                    .map(u::EncodableCategory)
-                    .collect(),
-            ),
-            license: self.license,
-            license_file: self.license_file,
-            repository: None,
-            badges: Some(self.badges),
-            links: None,
         };
 
-        (serde_json::to_string(&new_crate).unwrap(), self.tarball)
+        let mut tarball_builder = TarballBuilder::new();
+
+        match self.manifest {
+            Manifest::None => {}
+            Manifest::Generated => {
+                let mut package = cargo_manifest::Package::<()>::new(
+                    self.krate_name.clone(),
+                    self.version.to_string(),
+                );
+                package.categories = self.categories.none_or_filled().map(MaybeInherited::Local);
+                package.description = self.desc.map(MaybeInherited::Local);
+                package.documentation = self.doc_url.map(MaybeInherited::Local);
+                package.keywords = self.keywords.none_or_filled().map(MaybeInherited::Local);
+                package.license = self.license.map(MaybeInherited::Local);
+                package.license_file = self.license_file.map(MaybeInherited::Local);
+
+                let mut build_deps = DepsSet::new();
+                let mut deps = DepsSet::new();
+                let mut dev_deps = DepsSet::new();
+
+                for encoded in self.deps {
+                    let (name, dependency) = convert_dependency(&encoded);
+                    match encoded.kind {
+                        Some(DependencyKind::Build) => build_deps.insert(name, dependency),
+                        None | Some(DependencyKind::Normal) => deps.insert(name, dependency),
+                        Some(DependencyKind::Dev) => dev_deps.insert(name, dependency),
+                    };
+                }
+
+                let manifest = cargo_manifest::Manifest {
+                    package: Some(package),
+                    build_dependencies: build_deps.none_or_filled(),
+                    dependencies: deps.none_or_filled(),
+                    dev_dependencies: dev_deps.none_or_filled(),
+                    features: self.features.none_or_filled(),
+                    ..Default::default()
+                };
+
+                let manifest = toml::to_string(&manifest).unwrap();
+
+                let content = manifest.as_bytes();
+
+                let path = format!("{}-{}/Cargo.toml", self.krate_name, self.version);
+                tarball_builder = tarball_builder.add_file(&path, content);
+            }
+            Manifest::Custom(bytes) => {
+                let path = format!("{}-{}/Cargo.toml", self.krate_name, self.version);
+                tarball_builder = tarball_builder.add_file(&path, &bytes);
+            }
+        }
+
+        for (path, content) in self.files {
+            tarball_builder = tarball_builder.add_file(&path, &content);
+        }
+
+        let tarball = tarball_builder.build();
+        (serde_json::to_string(&metadata).unwrap(), tarball)
     }
 
     /// Consume this builder to make the Put request body
-    pub fn body(self) -> Vec<u8> {
+    pub fn body(self) -> Bytes {
         let (json, tarball) = self.build();
         PublishBuilder::create_publish_body(&json, &tarball)
     }
 
-    pub fn create_publish_body(json: &str, tarball: &[u8]) -> Vec<u8> {
-        let mut body = Vec::new();
-        body.extend(
-            [
-                json.len() as u8,
-                (json.len() >> 8) as u8,
-                (json.len() >> 16) as u8,
-                (json.len() >> 24) as u8,
-            ]
-            .iter()
-            .cloned(),
-        );
-        body.extend(json.as_bytes().iter().cloned());
+    pub fn create_publish_body(json: &str, tarball: &[u8]) -> Bytes {
+        let json_len = json.len();
+        let tarball_len = tarball.len();
 
-        body.extend(&[
-            tarball.len() as u8,
-            (tarball.len() >> 8) as u8,
-            (tarball.len() >> 16) as u8,
-            (tarball.len() >> 24) as u8,
-        ]);
-        body.extend(tarball);
-        body
+        let mut body = BytesMut::with_capacity(json_len + tarball_len + 2);
+        body.put_u32_le(json_len as u32);
+        body.put_slice(json.as_bytes());
+        body.put_u32_le(tarball_len as u32);
+        body.put_slice(tarball);
+
+        body.freeze()
+    }
+}
+
+impl From<PublishBuilder> for Bytes {
+    fn from(builder: PublishBuilder) -> Self {
+        builder.body()
+    }
+}
+
+fn convert_dependency(
+    encoded: &u::EncodableCrateDependency,
+) -> (String, cargo_manifest::Dependency) {
+    let (name, package) = match encoded.explicit_name_in_toml.as_ref() {
+        None => (encoded.name.to_string(), None),
+        Some(explicit_name_in_toml) => (
+            explicit_name_in_toml.to_string(),
+            Some(encoded.name.to_string()),
+        ),
+    };
+
+    let dependency = DependencyDetail {
+        version: Some(encoded.version_req.to_string()),
+        registry: encoded.registry.clone(),
+        features: encoded.features.clone().none_or_filled(),
+        optional: match encoded.optional {
+            true => Some(true),
+            false => None,
+        },
+        default_features: match encoded.default_features {
+            true => None,
+            false => Some(false),
+        },
+        package,
+        ..Default::default()
+    };
+
+    let dependency = cargo_manifest::Dependency::Detailed(dependency).simplify();
+    (name, dependency)
+}
+
+trait NoneOrFilled: Sized {
+    fn none_or_filled(self) -> Option<Self>;
+}
+
+impl<T> NoneOrFilled for Vec<T> {
+    fn none_or_filled(self) -> Option<Self> {
+        if self.is_empty() {
+            None
+        } else {
+            Some(self)
+        }
+    }
+}
+
+impl<K, V> NoneOrFilled for BTreeMap<K, V> {
+    fn none_or_filled(self) -> Option<Self> {
+        if self.is_empty() {
+            None
+        } else {
+            Some(self)
+        }
     }
 }

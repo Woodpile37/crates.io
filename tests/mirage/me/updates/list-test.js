@@ -11,7 +11,7 @@ module('Mirage | GET /api/v1/me/updates', function (hooks) {
 
   test('returns 403 for unauthenticated user', async function (assert) {
     let response = await fetch('/api/v1/me/updates');
-    assert.equal(response.status, 403);
+    assert.strictEqual(response.status, 403);
     assert.deepEqual(await response.json(), {
       errors: [{ detail: 'must be logged in to perform that action' }],
     });
@@ -28,7 +28,7 @@ module('Mirage | GET /api/v1/me/updates', function (hooks) {
     this.authenticateAs(user);
 
     let response = await fetch('/api/v1/me/updates');
-    assert.equal(response.status, 200);
+    assert.strictEqual(response.status, 200);
     assert.deepEqual(await response.json(), {
       versions: [
         {
@@ -46,6 +46,7 @@ module('Mirage | GET /api/v1/me/updates', function (hooks) {
           num: '1.2.3',
           published_by: null,
           readme_path: '/api/v1/crates/foo/1.2.3/readme',
+          rust_version: null,
           updated_at: '2017-02-24T12:34:56Z',
           yanked: false,
         },
@@ -61,7 +62,7 @@ module('Mirage | GET /api/v1/me/updates', function (hooks) {
     this.authenticateAs(user);
 
     let response = await fetch('/api/v1/me/updates');
-    assert.equal(response.status, 200);
+    assert.strictEqual(response.status, 200);
     assert.deepEqual(await response.json(), {
       versions: [],
       meta: { more: false },
@@ -76,10 +77,10 @@ module('Mirage | GET /api/v1/me/updates', function (hooks) {
     this.authenticateAs(user);
 
     let response = await fetch('/api/v1/me/updates?page=2');
-    assert.equal(response.status, 200);
+    assert.strictEqual(response.status, 200);
 
     let responsePayload = await response.json();
-    assert.equal(responsePayload.versions.length, 10);
+    assert.strictEqual(responsePayload.versions.length, 10);
     assert.deepEqual(
       responsePayload.versions.map(it => it.id),
       ['15', '14', '13', '12', '11', '10', '9', '8', '7', '6'],

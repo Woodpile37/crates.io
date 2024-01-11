@@ -1,13 +1,16 @@
 //! Endpoints for yanking and unyanking specific versions of crates
 
-use swirl::Job;
-
-use super::{extract_crate_name_and_semver, version_and_crate};
+use super::version_and_crate;
+use crate::auth::AuthCheck;
 use crate::controllers::cargo_prelude::*;
+use crate::models::token::EndpointScope;
 use crate::models::Rights;
 use crate::models::{insert_version_owner_action, VersionAction};
+use crate::rate_limiter::LimitedAction;
 use crate::schema::versions;
-use crate::worker;
+use crate::util::errors::version_not_found;
+use crate::worker::jobs;
+use tokio::runtime::Handle;
 
 /// Handles the `DELETE /crates/:crate_id/:version/yank` route.
 /// This does not delete a crate version, it makes the crate
@@ -18,30 +21,64 @@ use crate::worker;
 /// Crate deletion is not implemented to avoid breaking builds,
 /// and the goal of yanking a crate is to prevent crates
 /// beginning to depend on the yanked crate version.
-pub fn yank(req: &mut dyn RequestExt) -> EndpointResult {
-    modify_yank(req, true)
+pub async fn yank(
+    app: AppState,
+    Path((crate_name, version)): Path<(String, String)>,
+    req: Parts,
+) -> AppResult<Response> {
+    spawn_blocking(move || modify_yank(&crate_name, &version, &app, &req, true)).await
 }
 
 /// Handles the `PUT /crates/:crate_id/:version/unyank` route.
-pub fn unyank(req: &mut dyn RequestExt) -> EndpointResult {
-    modify_yank(req, false)
+pub async fn unyank(
+    app: AppState,
+    Path((crate_name, version)): Path<(String, String)>,
+    req: Parts,
+) -> AppResult<Response> {
+    spawn_blocking(move || modify_yank(&crate_name, &version, &app, &req, false)).await
 }
 
 /// Changes `yanked` flag on a crate version record
-fn modify_yank(req: &mut dyn RequestExt, yanked: bool) -> EndpointResult {
+fn modify_yank(
+    crate_name: &str,
+    version: &str,
+    state: &AppState,
+    req: &Parts,
+    yanked: bool,
+) -> AppResult<Response> {
     // FIXME: Should reject bad requests before authentication, but can't due to
     // lifetime issues with `req`.
-    let authenticated_user = req.authenticate()?;
-    let (crate_name, semver) = extract_crate_name_and_semver(req)?;
 
-    let conn = req.db_write()?;
-    let (version, krate) = version_and_crate(&conn, crate_name, semver)?;
-    let api_token_id = authenticated_user.api_token_id();
-    let user = authenticated_user.user();
-    let owners = krate.owners(&conn)?;
+    if semver::Version::parse(version).is_err() {
+        return Err(version_not_found(crate_name, version));
+    }
 
-    if user.rights(req.app(), &owners)? < Rights::Publish {
-        return Err(cargo_err("must already be an owner to yank or unyank"));
+    let conn = &mut *state.db_write()?;
+
+    let auth = AuthCheck::default()
+        .with_endpoint_scope(EndpointScope::Yank)
+        .for_crate(crate_name)
+        .check(req, conn)?;
+
+    state
+        .rate_limiter
+        .check_rate_limit(auth.user_id(), LimitedAction::YankUnyank, conn)?;
+
+    let (version, krate) = version_and_crate(conn, crate_name, version)?;
+    let api_token_id = auth.api_token_id();
+    let user = auth.user();
+    let owners = krate.owners(conn)?;
+
+    if Handle::current().block_on(user.rights(state, &owners))? < Rights::Publish {
+        if user.is_admin {
+            let action = if yanked { "yanking" } else { "unyanking" };
+            warn!(
+                "Admin {} is {action} {}@{}",
+                user.gh_login, krate.name, version.num
+            );
+        } else {
+            return Err(cargo_err("must already be an owner to yank or unyank"));
+        }
     }
 
     if version.yanked == yanked {
@@ -51,7 +88,7 @@ fn modify_yank(req: &mut dyn RequestExt, yanked: bool) -> EndpointResult {
 
     diesel::update(&version)
         .set(versions::yanked.eq(yanked))
-        .execute(&*conn)?;
+        .execute(conn)?;
 
     let action = if yanked {
         VersionAction::Yank
@@ -59,9 +96,9 @@ fn modify_yank(req: &mut dyn RequestExt, yanked: bool) -> EndpointResult {
         VersionAction::Unyank
     };
 
-    insert_version_owner_action(&conn, version.id, user.id, api_token_id, action)?;
+    insert_version_owner_action(conn, version.id, user.id, api_token_id, action)?;
 
-    worker::sync_yanked(krate.name, version.num).enqueue(&conn)?;
+    jobs::enqueue_sync_to_index(&krate.name, conn)?;
 
     ok_true()
 }

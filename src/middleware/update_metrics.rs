@@ -1,44 +1,58 @@
-use super::app::RequestApp;
-use super::prelude::*;
-use conduit_router::RoutePattern;
+use crate::app::AppState;
+use axum::extract::{MatchedPath, Request};
+use axum::middleware::Next;
+use axum::response::Response;
 
-#[derive(Debug, Default)]
-pub(super) struct UpdateMetrics;
+use prometheus::IntGauge;
+use std::time::Instant;
 
-impl Middleware for UpdateMetrics {
-    fn before(&self, req: &mut dyn RequestExt) -> BeforeResult {
-        let metrics = &req.app().instance_metrics;
+pub async fn update_metrics(
+    state: AppState,
+    matched_path: Option<MatchedPath>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let start_instant = Instant::now();
 
-        metrics.requests_in_flight.inc();
+    let metrics = &state.instance_metrics;
+    let _guard = GaugeGuard::inc_for(&metrics.requests_in_flight);
 
-        Ok(())
+    let response = next.run(req).await;
+
+    metrics.requests_total.inc();
+
+    let endpoint = match matched_path {
+        Some(ref matched_path) => matched_path.as_str(),
+        None => "<unknown>",
+    };
+    metrics
+        .response_times
+        .with_label_values(&[endpoint])
+        .observe(start_instant.elapsed().as_millis() as f64 / 1000.0);
+
+    let status = response.status().as_u16();
+    metrics
+        .responses_by_status_code_total
+        .with_label_values(&[&status.to_string()])
+        .inc();
+
+    response
+}
+
+/// A struct that stores a reference to an `IntGauge` so it can be decremented when dropped
+struct GaugeGuard<'a> {
+    gauge: &'a IntGauge,
+}
+
+impl<'a> GaugeGuard<'a> {
+    fn inc_for(gauge: &'a IntGauge) -> Self {
+        gauge.inc();
+        Self { gauge }
     }
+}
 
-    fn after(&self, req: &mut dyn RequestExt, res: AfterResult) -> AfterResult {
-        let metrics = &req.app().instance_metrics;
-
-        metrics.requests_in_flight.dec();
-        metrics.requests_total.inc();
-
-        let endpoint = req
-            .extensions()
-            .get::<RoutePattern>()
-            .map(|p| p.pattern())
-            .unwrap_or("<unknown>");
-        metrics
-            .response_times
-            .with_label_values(&[endpoint])
-            .observe(req.elapsed().as_millis() as f64 / 1000.0);
-
-        let status = match &res {
-            Ok(res) => res.status().as_u16(),
-            Err(_) => 500,
-        };
-        metrics
-            .responses_by_status_code_total
-            .with_label_values(&[&status.to_string()])
-            .inc();
-
-        res
+impl<'a> Drop for GaugeGuard<'a> {
+    fn drop(&mut self) {
+        self.gauge.dec();
     }
 }

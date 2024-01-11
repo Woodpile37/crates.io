@@ -9,10 +9,11 @@ use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 /// database during each connection for performance reasons. To reduce the write load, this struct
 /// collects the pending updates from the current process and writes in batch.
 ///
-/// To avoid locking the whole data structure behind a RwLock, which could potentially delay
-/// requests, this uses the dashmap crate. A DashMap has the same public API as an HashMap, but
-/// stores the items into `num_cpus()*4` individually locked shards. This approach reduces the
-/// likelihood of a request encountering a locked shard.
+/// To avoid locking the whole data structure behind a [RwLock](std::sync::RwLock), which could
+/// potentially delay requests, this uses the [dashmap] crate. A [DashMap] has the same public API
+/// as an [HashMap](std::collections::HashMap), but stores the items into `num_cpus()*4`
+/// individually locked shards. This approach reduces the likelihood of a request encountering a
+/// locked shard.
 ///
 /// Persisting the download counts in the database also takes advantage of the inner sharding of
 /// DashMaps: to avoid locking all the download requests at the same time each iteration only
@@ -20,7 +21,7 @@ use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 ///
 /// The disadvantage of this approach is that download counts are stored in memory until they're
 /// persisted, so it's possible to lose some of them if the process exits ungracefully. While
-/// that's far from ideal, the advantage of batching database updates far outweights potentially
+/// that's far from ideal, the advantage of batching database updates far outweighs potentially
 /// losing some download counts.
 #[derive(Debug)]
 pub struct DownloadsCounter {
@@ -65,16 +66,16 @@ impl DownloadsCounter {
     }
 
     pub fn persist_all_shards(&self, app: &App) -> Result<PersistStats, Error> {
-        let conn = app.primary_database.get()?;
-        self.persist_all_shards_with_conn(&conn)
+        let conn = &mut app.db_write()?;
+        self.persist_all_shards_with_conn(conn)
     }
 
     pub fn persist_next_shard(&self, app: &App) -> Result<PersistStats, Error> {
-        let conn = app.primary_database.get()?;
-        self.persist_next_shard_with_conn(&conn)
+        let conn = &mut app.db_write()?;
+        self.persist_next_shard_with_conn(conn)
     }
 
-    fn persist_all_shards_with_conn(&self, conn: &PgConnection) -> Result<PersistStats, Error> {
+    fn persist_all_shards_with_conn(&self, conn: &mut PgConnection) -> Result<PersistStats, Error> {
         let mut stats = PersistStats::default();
         for shard in self.inner.shards() {
             let shard = std::mem::take(&mut *shard.write());
@@ -84,7 +85,7 @@ impl DownloadsCounter {
         Ok(stats)
     }
 
-    fn persist_next_shard_with_conn(&self, conn: &PgConnection) -> Result<PersistStats, Error> {
+    fn persist_next_shard_with_conn(&self, conn: &mut PgConnection) -> Result<PersistStats, Error> {
         // Replace the next shard in the ring with an empty HashMap (clearing it), and return the
         // previous contents for processing. The fetch_add method wraps around on overflow, so it's
         // fine to keep incrementing it without resetting.
@@ -97,10 +98,10 @@ impl DownloadsCounter {
         Ok(stats)
     }
 
-    fn persist_shard(
+    fn persist_shard<'a, Iter: Iterator<Item = (&'a i32, &'a SharedValue<AtomicUsize>)>>(
         &self,
-        conn: &PgConnection,
-        shard: hashbrown::hash_map::Iter<'_, i32, SharedValue<AtomicUsize>>,
+        conn: &mut PgConnection,
+        shard: Iter,
     ) -> Result<PersistStats, Error> {
         use crate::schema::{version_downloads, versions};
 
@@ -245,6 +246,7 @@ mod tests {
     use super::*;
     use crate::email::Emails;
     use crate::models::{Crate, NewCrate, NewUser, NewVersion, User};
+    use crate::test_util::test_db_connection;
     use diesel::PgConnection;
     use semver::Version;
     use std::collections::BTreeMap;
@@ -252,12 +254,12 @@ mod tests {
     #[test]
     fn test_increment_and_persist_all() {
         let counter = DownloadsCounter::new();
-        let conn = crate::db::test_conn();
-        let mut state = State::new(&conn);
+        let (_test_db, conn) = &mut test_db_connection();
+        let mut state = State::new(conn);
 
-        let v1 = state.new_version(&conn);
-        let v2 = state.new_version(&conn);
-        let v3 = state.new_version(&conn);
+        let v1 = state.new_version(conn);
+        let v2 = state.new_version(conn);
+        let v3 = state.new_version(conn);
 
         // Add 15 downloads between v1 and v2, and no downloads for v3.
         for _ in 0..10 {
@@ -266,11 +268,11 @@ mod tests {
         for _ in 0..5 {
             counter.increment(v2);
         }
-        assert_eq!(15, counter.pending_count.load(Ordering::SeqCst));
+        assert_eq!(counter.pending_count.load(Ordering::SeqCst), 15);
 
         // Persist everything to the database
         let stats = counter
-            .persist_all_shards_with_conn(&conn)
+            .persist_all_shards_with_conn(conn)
             .expect("failed to persist all shards");
 
         // Ensure the stats are accurate
@@ -285,24 +287,24 @@ mod tests {
         );
 
         // Ensure the download counts in the database are what we expect.
-        state.assert_downloads_count(&conn, v1, 10);
-        state.assert_downloads_count(&conn, v2, 5);
-        state.assert_downloads_count(&conn, v3, 0);
+        state.assert_downloads_count(conn, v1, 10);
+        state.assert_downloads_count(conn, v2, 5);
+        state.assert_downloads_count(conn, v3, 0);
     }
 
     #[test]
     fn test_increment_and_persist_shard() {
         let counter = DownloadsCounter::new();
-        let conn = crate::db::test_conn();
-        let mut state = State::new(&conn);
+        let (_test_db, conn) = &mut test_db_connection();
+        let mut state = State::new(conn);
 
-        let v1 = state.new_version(&conn);
+        let v1 = state.new_version(conn);
         let v1_shard = counter.inner.determine_map(&v1);
 
         // For this test to work we need the two versions to be stored in different shards.
-        let mut v2 = state.new_version(&conn);
+        let mut v2 = state.new_version(conn);
         while counter.inner.determine_map(&v2) == v1_shard {
-            v2 = state.new_version(&conn);
+            v2 = state.new_version(conn);
         }
         let v2_shard = counter.inner.determine_map(&v2);
 
@@ -313,13 +315,13 @@ mod tests {
         for _ in 0..5 {
             counter.increment(v2);
         }
-        assert_eq!(15, counter.pending_count.load(Ordering::SeqCst));
+        assert_eq!(counter.pending_count.load(Ordering::SeqCst), 15);
 
         // Persist one shard at the time and ensure the stats returned for each shard are expected.
         let mut pending = 15;
         for shard in 0..counter.shards_count() {
             let stats = counter
-                .persist_next_shard_with_conn(&conn)
+                .persist_next_shard_with_conn(conn)
                 .expect("failed to persist shard");
 
             if shard == v1_shard {
@@ -333,7 +335,7 @@ mod tests {
                         pending_downloads: pending,
                     }
                 );
-                state.assert_downloads_count(&conn, v1, 10);
+                state.assert_downloads_count(conn, v1, 10);
             } else if shard == v2_shard {
                 pending -= 5;
                 assert_eq!(
@@ -345,7 +347,7 @@ mod tests {
                         pending_downloads: pending,
                     }
                 );
-                state.assert_downloads_count(&conn, v2, 5);
+                state.assert_downloads_count(conn, v2, 5);
             } else {
                 assert_eq!(
                     stats,
@@ -361,8 +363,8 @@ mod tests {
         assert_eq!(pending, 0);
 
         // Finally ensure that the download counts in the database are what we expect.
-        state.assert_downloads_count(&conn, v1, 10);
-        state.assert_downloads_count(&conn, v2, 5);
+        state.assert_downloads_count(conn, v1, 10);
+        state.assert_downloads_count(conn, v2, 5);
     }
 
     #[test]
@@ -384,10 +386,10 @@ mod tests {
         F: Fn(&DashMap<i32, AtomicUsize>, i32, i32) -> bool,
     {
         let counter = DownloadsCounter::new();
-        let conn = crate::db::test_conn();
-        let mut state = State::new(&conn);
+        let (_test_db, conn) = &mut test_db_connection();
+        let mut state = State::new(conn);
 
-        let v1 = state.new_version(&conn);
+        let v1 = state.new_version(conn);
 
         // Generate the second version. It should **not** already be in the database.
         let mut v2 = v1 + 1;
@@ -401,7 +403,7 @@ mod tests {
 
         // No error should happen when persisting. The missing versions should be ignored.
         let stats = counter
-            .persist_all_shards_with_conn(&conn)
+            .persist_all_shards_with_conn(conn)
             .expect("failed to persist download counts");
 
         // The download should not be counted for version 2.
@@ -414,8 +416,8 @@ mod tests {
                 pending_downloads: 0,
             }
         );
-        state.assert_downloads_count(&conn, v1, 1);
-        state.assert_downloads_count(&conn, v2, 0);
+        state.assert_downloads_count(conn, v1, 1);
+        state.assert_downloads_count(conn, v2, 0);
     }
 
     struct State {
@@ -425,7 +427,7 @@ mod tests {
     }
 
     impl State {
-        fn new(conn: &PgConnection) -> Self {
+        fn new(conn: &mut PgConnection) -> Self {
             let user = NewUser {
                 gh_id: 0,
                 gh_login: "ghost",
@@ -438,7 +440,7 @@ mod tests {
                 name: "foo",
                 ..NewCrate::default()
             }
-            .create_or_update(conn, user.id, None)
+            .create(conn, user.id)
             .expect("failed to create crate");
 
             Self {
@@ -448,16 +450,16 @@ mod tests {
             }
         }
 
-        fn new_version(&mut self, conn: &PgConnection) -> i32 {
+        fn new_version(&mut self, conn: &mut PgConnection) -> i32 {
             let version = NewVersion::new(
                 self.krate.id,
                 &Version::parse(&format!("{}.0.0", self.next_version)).unwrap(),
                 &BTreeMap::new(),
                 None,
-                None,
                 0,
                 self.user.id,
                 "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+                None,
                 None,
             )
             .expect("failed to create version")
@@ -468,13 +470,13 @@ mod tests {
             version.id
         }
 
-        fn assert_downloads_count(&self, conn: &PgConnection, version: i32, expected: i64) {
-            use crate::schema::version_downloads::dsl::*;
+        fn assert_downloads_count(&self, conn: &mut PgConnection, version: i32, expected: i64) {
+            use crate::schema::version_downloads;
             use diesel::dsl::*;
 
-            let actual: Option<i64> = version_downloads
-                .select(sum(downloads))
-                .filter(version_id.eq(version))
+            let actual: Option<i64> = version_downloads::table
+                .select(sum(version_downloads::downloads))
+                .filter(version_downloads::version_id.eq(version))
                 .first(conn)
                 .unwrap();
             assert_eq!(actual.unwrap_or(0), expected);

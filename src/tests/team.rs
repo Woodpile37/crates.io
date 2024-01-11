@@ -3,10 +3,13 @@ use crate::{
     builders::{CrateBuilder, PublishBuilder},
     new_team, OwnerTeamsResponse, RequestHelper, TestApp,
 };
-use cargo_registry::models::{Crate, NewTeam};
+use crates_io::{
+    models::{Crate, NewTeam},
+    schema::teams,
+};
 
-use conduit::StatusCode;
 use diesel::*;
+use http::StatusCode;
 
 impl crate::util::MockAnonymousUser {
     /// List the team owners of the specified crate.
@@ -16,7 +19,7 @@ impl crate::util::MockAnonymousUser {
     }
 }
 
-// Test adding team without `github:`
+/// Test adding team without `github:`
 #[test]
 fn not_github() {
     let (app, _, user, token) = TestApp::init().with_token();
@@ -28,7 +31,7 @@ fn not_github() {
     let response = token.add_named_owner("foo_not_github", "dropbox:foo:foo");
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
-        response.into_json(),
+        response.json(),
         json!({ "errors": [{ "detail": "unknown organization handler, only 'github:org:team' is supported" }] })
     );
 }
@@ -44,12 +47,12 @@ fn weird_name() {
     let response = token.add_named_owner("foo_weird_name", "github:foo/../bar:wut");
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
-        response.into_json(),
+        response.json(),
         json!({ "errors": [{ "detail": "organization cannot contain special characters like /" }] })
     );
 }
 
-// Test adding team without second `:`
+/// Test adding team without second `:`
 #[test]
 fn one_colon() {
     let (app, _, user, token) = TestApp::init().with_token();
@@ -61,28 +64,29 @@ fn one_colon() {
     let response = token.add_named_owner("foo_one_colon", "github:foo");
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
-        response.into_json(),
+        response.json(),
         json!({ "errors": [{ "detail": "missing github team argument; format is github:org:team" }] })
     );
 }
 
 #[test]
-fn nonexistent_team() {
+fn add_nonexistent_team() {
     let (app, _, user, token) = TestApp::init().with_token();
 
     app.db(|conn| {
-        CrateBuilder::new("foo_nonexistent", user.as_model().id).expect_build(conn);
+        CrateBuilder::new("foo_add_nonexistent", user.as_model().id).expect_build(conn);
     });
 
-    let response = token.add_named_owner("foo_nonexistent", "github:test-org:this-does-not-exist");
+    let response =
+        token.add_named_owner("foo_add_nonexistent", "github:test-org:this-does-not-exist");
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
-        response.into_json(),
+        response.json(),
         json!({ "errors": [{ "detail": "could not find the github team test-org/this-does-not-exist" }] })
     );
 }
 
-// Test adding a renamed team
+/// Test adding a renamed team
 #[test]
 fn add_renamed_team() {
     let (app, anon) = TestApp::init().empty();
@@ -91,7 +95,7 @@ fn add_renamed_team() {
     let owner_id = user.as_model().id;
 
     app.db(|conn| {
-        use cargo_registry::schema::teams::dsl::*;
+        use crates_io::schema::teams;
 
         CrateBuilder::new("foo_renamed_team", owner_id).expect_build(conn);
 
@@ -107,7 +111,7 @@ fn add_renamed_team() {
         .create_or_update(conn)
         .unwrap();
 
-        assert_eq!(teams.count().get_result::<i64>(conn).unwrap(), 1);
+        assert_eq!(teams::table.count().get_result::<i64>(conn).unwrap(), 1);
     });
 
     token
@@ -119,7 +123,7 @@ fn add_renamed_team() {
     assert_eq!(json.teams[0].login, "github:test-org:core");
 }
 
-// Test adding team names with mixed case, when on the team
+/// Test adding team names with mixed case, when on the team
 #[test]
 fn add_team_mixed_case() {
     let (app, anon) = TestApp::init().empty();
@@ -174,7 +178,7 @@ fn add_team_as_org_owner() {
     assert_eq!(json.teams[0].login, "github:test-org:core");
 }
 
-// Test adding team as owner when not on it
+/// Test adding team as owner when not on it
 #[test]
 fn add_team_as_non_member() {
     let (app, _) = TestApp::init().empty();
@@ -188,7 +192,7 @@ fn add_team_as_non_member() {
     let response = token.add_named_owner("foo_team_non_member", "github:test-org:core");
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
-        response.into_json(),
+        response.json(),
         json!({ "errors": [{ "detail": "only members of a team or organization owners can add it as an owner" }] })
     );
 }
@@ -213,7 +217,7 @@ fn remove_team_as_named_owner() {
     let response = token_on_both_teams.remove_named_owner("foo_remove_team", username);
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
-        response.into_json(),
+        response.json(),
         json!({ "errors": [{ "detail": "cannot remove all individual owners of a crate. Team member don't have permission to modify owners, so at least one individual owner is required." }] })
     );
 
@@ -222,11 +226,11 @@ fn remove_team_as_named_owner() {
         .good();
 
     let user_on_one_team = app.db_new_user("user-one-team");
-    let crate_to_publish = PublishBuilder::new("foo_remove_team").version("2.0.0");
+    let crate_to_publish = PublishBuilder::new("foo_remove_team", "2.0.0");
     let response = user_on_one_team.publish_crate(crate_to_publish);
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
-        response.into_json(),
+        response.json(),
         json!({ "errors": [{ "detail": "this crate exists but you don't seem to be an owner. If you believe this is a mistake, perhaps you need to accept an invitation to be an owner before publishing." }] })
     );
 }
@@ -253,7 +257,7 @@ fn remove_team_as_team_owner() {
         token_on_one_team.remove_named_owner("foo_remove_team_owner", "github:test-org:all");
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
-        response.into_json(),
+        response.json(),
         json!({ "errors": [{ "detail": "team members don't have permission to modify owners" }] })
     );
 
@@ -263,12 +267,35 @@ fn remove_team_as_team_owner() {
         token_org_owner.remove_named_owner("foo_remove_team_owner", "github:test-org:all");
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
-        response.into_json(),
+        response.json(),
         json!({ "errors": [{ "detail": "only owners have permission to modify owners" }] })
     );
 }
 
-// Test trying to publish a crate we don't own
+#[test]
+fn remove_nonexistent_team() {
+    let (app, _, user, token) = TestApp::init().with_token();
+
+    app.db(|conn| {
+        CrateBuilder::new("foo_remove_nonexistent", user.as_model().id).expect_build(conn);
+        insert_into(teams::table)
+            .values((
+                teams::login.eq("github:test-org:this-does-not-exist"),
+                teams::github_id.eq(5678),
+            ))
+            .execute(conn)
+            .expect("couldn't insert nonexistent team")
+    });
+
+    token
+        .remove_named_owner(
+            "foo_remove_nonexistent",
+            "github:test-org:this-does-not-exist",
+        )
+        .good();
+}
+
+/// Test trying to publish a crate we don't own
 #[test]
 fn publish_not_owned() {
     let (app, _) = TestApp::full().empty();
@@ -285,11 +312,11 @@ fn publish_not_owned() {
 
     let user_on_one_team = app.db_new_user("user-one-team");
 
-    let crate_to_publish = PublishBuilder::new("foo_not_owned").version("2.0.0");
+    let crate_to_publish = PublishBuilder::new("foo_not_owned", "2.0.0");
     let response = user_on_one_team.publish_crate(crate_to_publish);
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
-        response.into_json(),
+        response.json(),
         json!({ "errors": [{ "detail": "this crate exists but you don't seem to be an owner. If you believe this is a mistake, perhaps you need to accept an invitation to be an owner before publishing." }] })
     );
 }
@@ -310,16 +337,16 @@ fn publish_org_owner_owned() {
 
     let user_org_owner = app.db_new_user("user-org-owner");
 
-    let crate_to_publish = PublishBuilder::new("foo_not_owned").version("2.0.0");
+    let crate_to_publish = PublishBuilder::new("foo_not_owned", "2.0.0");
     let response = user_org_owner.publish_crate(crate_to_publish);
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
-        response.into_json(),
+        response.json(),
         json!({ "errors": [{ "detail": "this crate exists but you don't seem to be an owner. If you believe this is a mistake, perhaps you need to accept an invitation to be an owner before publishing." }] })
     );
 }
 
-// Test trying to publish a krate we do own (but only because of teams)
+/// Test trying to publish a krate we do own (but only because of teams)
 #[test]
 fn publish_owned() {
     let (app, _) = TestApp::full().empty();
@@ -336,11 +363,11 @@ fn publish_owned() {
 
     let user_on_one_team = app.db_new_user("user-one-team");
 
-    let crate_to_publish = PublishBuilder::new("foo_team_owned").version("2.0.0");
+    let crate_to_publish = PublishBuilder::new("foo_team_owned", "2.0.0");
     user_on_one_team.publish_crate(crate_to_publish).good();
 }
 
-// Test trying to change owners (when only on an owning team)
+/// Test trying to change owners (when only on an owning team)
 #[test]
 fn add_owners_as_org_owner() {
     let (app, _) = TestApp::init().empty();
@@ -361,7 +388,7 @@ fn add_owners_as_org_owner() {
     let response = token_org_owner.add_named_owner("foo_add_owner", "arbitrary_username");
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
-        response.into_json(),
+        response.json(),
         json!({ "errors": [{ "detail": "only owners have permission to modify owners" }] })
     );
 }
@@ -386,7 +413,7 @@ fn add_owners_as_team_owner() {
     let response = token_on_one_team.add_named_owner("foo_add_owner", "arbitrary_username");
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
-        response.into_json(),
+        response.json(),
         json!({ "errors": [{ "detail": "team members don't have permission to modify owners" }] })
     );
 }
@@ -422,9 +449,7 @@ fn crates_by_team_id_not_including_deleted_owners() {
 
         let krate = CrateBuilder::new("foo", user.id).expect_build(conn);
         add_team_to_crate(&t, &krate, user, conn).unwrap();
-        krate
-            .owner_remove(app.as_inner(), conn, user, &t.login)
-            .unwrap();
+        krate.owner_remove(conn, &t.login).unwrap();
         t
     });
 

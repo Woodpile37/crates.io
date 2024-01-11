@@ -1,107 +1,89 @@
-use std::path::PathBuf;
-use std::sync::Mutex;
-
-use crate::util::errors::{server_error, AppResult};
-
 use crate::config;
-use crate::middleware::log_request::add_custom_metadata;
 use crate::Env;
+use lettre::address::Envelope;
+use lettre::message::header::ContentType;
+use lettre::message::Mailbox;
 use lettre::transport::file::FileTransport;
 use lettre::transport::smtp::authentication::{Credentials, Mechanism};
 use lettre::transport::smtp::SmtpTransport;
+use lettre::transport::stub::StubTransport;
 use lettre::{Message, Transport};
 use rand::distributions::{Alphanumeric, DistString};
 
-#[derive(Debug)]
+pub trait Email {
+    const SUBJECT: &'static str;
+    fn body(&self) -> String;
+}
+
+#[derive(Debug, Clone)]
 pub struct Emails {
     backend: EmailBackend,
+    pub domain: String,
+    from: Mailbox,
 }
+
+const DEFAULT_FROM: &str = "noreply@crates.io";
 
 impl Emails {
     /// Create a new instance detecting the backend from the environment. This will either connect
     /// to a SMTP server or store the emails on the local filesystem.
     pub fn from_environment(config: &config::Server) -> Self {
-        let backend = match (
-            dotenv::var("MAILGUN_SMTP_LOGIN"),
-            dotenv::var("MAILGUN_SMTP_PASSWORD"),
-            dotenv::var("MAILGUN_SMTP_SERVER"),
-        ) {
-            (Ok(login), Ok(password), Ok(server)) => EmailBackend::Smtp {
-                server,
-                login,
-                password,
-            },
-            _ => EmailBackend::FileSystem {
-                path: "/tmp".into(),
-            },
+        let login = dotenvy::var("MAILGUN_SMTP_LOGIN");
+        let password = dotenvy::var("MAILGUN_SMTP_PASSWORD");
+        let server = dotenvy::var("MAILGUN_SMTP_SERVER");
+
+        let from = login.as_deref().unwrap_or(DEFAULT_FROM).parse().unwrap();
+
+        let backend = match (login, password, server) {
+            (Ok(login), Ok(password), Ok(server)) => {
+                let transport = SmtpTransport::relay(&server)
+                    .unwrap()
+                    .credentials(Credentials::new(login, password))
+                    .authentication(vec![Mechanism::Plain])
+                    .build();
+
+                EmailBackend::Smtp(Box::new(transport))
+            }
+            _ => {
+                let transport = FileTransport::new("/tmp");
+                EmailBackend::FileSystem(transport)
+            }
         };
 
         if config.base.env == Env::Production && !matches!(backend, EmailBackend::Smtp { .. }) {
             panic!("only the smtp backend is allowed in production");
         }
 
-        Self { backend }
+        let domain = config.domain_name.clone();
+
+        Self {
+            backend,
+            domain,
+            from,
+        }
     }
 
     /// Create a new test backend that stores all the outgoing emails in memory, allowing for tests
     /// to later assert the mails were sent.
     pub fn new_in_memory() -> Self {
         Self {
-            backend: EmailBackend::Memory {
-                mails: Mutex::new(Vec::new()),
-            },
+            backend: EmailBackend::Memory(StubTransport::new_ok()),
+            domain: "crates.io".into(),
+            from: DEFAULT_FROM.parse().unwrap(),
         }
-    }
-
-    /// Attempts to send a confirmation email.
-    pub fn send_user_confirm(&self, email: &str, user_name: &str, token: &str) -> AppResult<()> {
-        // Create a URL with token string as path to send to user
-        // If user clicks on path, look email/user up in database,
-        // make sure tokens match
-
-        let subject = "Please confirm your email address";
-        let body = format!(
-            "Hello {}! Welcome to Crates.io. Please click the
-link below to verify your email address. Thank you!\n
-https://{}/confirm/{}",
-            user_name,
-            crate::config::domain_name(),
-            token
-        );
-
-        self.send(email, subject, &body)
-    }
-
-    /// Attempts to send an ownership invitation.
-    pub fn send_owner_invite(
-        &self,
-        email: &str,
-        user_name: &str,
-        crate_name: &str,
-        token: &str,
-    ) -> AppResult<()> {
-        let subject = "Crate ownership invitation";
-        let body = format!(
-            "{user_name} has invited you to become an owner of the crate {crate_name}!\n
-Visit https://{domain}/accept-invite/{token} to accept this invitation,
-or go to https://{domain}/me/pending-invites to manage all of your crate ownership invitations.",
-            domain = crate::config::domain_name()
-        );
-
-        self.send(email, subject, &body)
     }
 
     /// This is supposed to be used only during tests, to retrieve the messages stored in the
     /// "memory" backend. It's not cfg'd away because our integration tests need to access this.
-    pub fn mails_in_memory(&self) -> Option<Vec<StoredEmail>> {
-        if let EmailBackend::Memory { mails } = &self.backend {
-            Some(mails.lock().unwrap().clone())
+    pub fn mails_in_memory(&self) -> Option<Vec<(Envelope, String)>> {
+        if let EmailBackend::Memory(transport) = &self.backend {
+            Some(transport.messages())
         } else {
             None
         }
     }
 
-    fn send(&self, recipient: &str, subject: &str, body: &str) -> AppResult<()> {
+    pub fn send<E: Email>(&self, recipient: &str, email: E) -> Result<(), EmailError> {
         // The message ID is normally generated by the SMTP server, but if we let it generate the
         // ID there will be no way for the crates.io application to know the ID of the message it
         // just sent, as it's not included in the SMTP response.
@@ -112,101 +94,54 @@ or go to https://{domain}/me/pending-invites to manage all of your crate ownersh
         let message_id = format!(
             "<{}@{}>",
             Alphanumeric.sample_string(&mut rand::thread_rng(), 32),
-            crate::config::domain_name(),
+            self.domain,
         );
+
+        let subject = E::SUBJECT;
+        let body = email.body();
 
         let email = Message::builder()
             .message_id(Some(message_id.clone()))
             .to(recipient.parse()?)
-            .from(self.sender_address().parse()?)
+            .from(self.from.clone())
             .subject(subject)
-            .body(body.to_string())?;
+            .header(ContentType::TEXT_PLAIN)
+            .body(body)?;
 
-        match &self.backend {
-            EmailBackend::Smtp {
-                server,
-                login,
-                password,
-            } => {
-                add_custom_metadata("email_backend", "smtp");
-
-                SmtpTransport::relay(server)
-                    .and_then(|transport| {
-                        transport
-                            .credentials(Credentials::new(login.clone(), password.clone()))
-                            .authentication(vec![Mechanism::Plain])
-                            .build()
-                            .send(&email)
-                    })
-                    .map_err(|e| {
-                        add_custom_metadata("email_error", e);
-                        server_error("Failed to send the email")
-                    })?;
-
-                add_custom_metadata("email_id", message_id);
-            }
-            EmailBackend::FileSystem { path } => {
-                add_custom_metadata("email_backend", "fs");
-
-                let id = FileTransport::new(&path).send(&email).map_err(|err| {
-                    add_custom_metadata("email_error", err);
-                    server_error("Email file could not be generated")
-                })?;
-
-                add_custom_metadata("email_path", path.join(format!("{id}.eml")).display());
-            }
-            EmailBackend::Memory { mails } => {
-                add_custom_metadata("email_backend", "memory");
-
-                mails.lock().unwrap().push(StoredEmail {
-                    to: recipient.into(),
-                    subject: subject.into(),
-                    body: body.into(),
-                });
-            }
-        }
-
-        Ok(())
-    }
-
-    fn sender_address(&self) -> &str {
-        match &self.backend {
-            EmailBackend::Smtp { login, .. } => login,
-            EmailBackend::FileSystem { .. } => "test@localhost",
-            EmailBackend::Memory { .. } => "test@localhost",
-        }
+        self.backend.send(email).map_err(EmailError::TransportError)
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum EmailError {
+    #[error(transparent)]
+    AddressError(#[from] lettre::address::AddressError),
+    #[error(transparent)]
+    MessageBuilderError(#[from] lettre::error::Error),
+    #[error(transparent)]
+    TransportError(anyhow::Error),
+}
+
+#[derive(Debug, Clone)]
 enum EmailBackend {
     /// Backend used in production to send mails using SMTP.
-    Smtp {
-        server: String,
-        login: String,
-        password: String,
-    },
+    ///
+    /// This is using `Box` to avoid a large size difference between variants.
+    Smtp(Box<SmtpTransport>),
     /// Backend used locally during development, will store the emails in the provided directory.
-    FileSystem { path: PathBuf },
+    FileSystem(FileTransport),
     /// Backend used during tests, will keep messages in memory to allow tests to retrieve them.
-    Memory { mails: Mutex<Vec<StoredEmail>> },
+    Memory(StubTransport),
 }
 
-// Custom Debug implementation to avoid showing the SMTP password.
-impl std::fmt::Debug for EmailBackend {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl EmailBackend {
+    fn send(&self, message: Message) -> anyhow::Result<()> {
         match self {
-            EmailBackend::Smtp { server, login, .. } => {
-                // The password field is *intentionally* not included
-                f.debug_struct("Smtp")
-                    .field("server", server)
-                    .field("login", login)
-                    .finish()?;
-            }
-            EmailBackend::FileSystem { path } => {
-                f.debug_struct("FileSystem").field("path", path).finish()?;
-            }
-            EmailBackend::Memory { .. } => f.write_str("Memory")?,
+            EmailBackend::Smtp(transport) => transport.send(&message).map(|_| ())?,
+            EmailBackend::FileSystem(transport) => transport.send(&message).map(|_| ())?,
+            EmailBackend::Memory(transport) => transport.send(&message).map(|_| ())?,
         }
+
         Ok(())
     }
 }
@@ -222,14 +157,23 @@ pub struct StoredEmail {
 mod tests {
     use super::*;
 
+    struct TestEmail;
+
+    impl Email for TestEmail {
+        const SUBJECT: &'static str = "test";
+
+        fn body(&self) -> String {
+            "test".into()
+        }
+    }
+
     #[test]
     fn sending_to_invalid_email_fails() {
         let emails = Emails::new_in_memory();
 
         assert_err!(emails.send(
             "String.Format(\"{0}.{1}@live.com\", FirstName, LastName)",
-            "test",
-            "test",
+            TestEmail
         ));
     }
 
@@ -237,6 +181,6 @@ mod tests {
     fn sending_to_valid_email_succeeds() {
         let emails = Emails::new_in_memory();
 
-        assert_ok!(emails.send("someone@example.com", "test", "test"));
+        assert_ok!(emails.send("someone@example.com", TestEmail));
     }
 }

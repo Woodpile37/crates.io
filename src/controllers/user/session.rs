@@ -1,14 +1,18 @@
 use crate::controllers::frontend_prelude::*;
 
-use conduit_cookie::RequestSession;
+use axum::extract::{FromRequestParts, Query};
 use oauth2::reqwest::http_client;
-use oauth2::{AuthorizationCode, Scope, TokenResponse};
+use oauth2::{AuthorizationCode, CsrfToken, Scope, TokenResponse};
+use tokio::runtime::Handle;
 
 use crate::email::Emails;
-use crate::github::GithubUser;
+use crate::middleware::log_request::RequestLogExt;
+use crate::middleware::session::SessionExtension;
 use crate::models::{NewUser, User};
 use crate::schema::users;
 use crate::util::errors::ReadOnlyMode;
+use crate::views::EncodableMe;
+use crates_io_github::GithubUser;
 
 /// Handles the `GET /api/private/session/begin` route.
 ///
@@ -25,18 +29,24 @@ use crate::util::errors::ReadOnlyMode;
 ///     "url": "https://github.com/login/oauth/authorize?client_id=...&state=...&scope=read%3Aorg"
 /// }
 /// ```
-pub fn begin(req: &mut dyn RequestExt) -> EndpointResult {
-    let (url, state) = req
-        .app()
+pub async fn begin(app: AppState, session: SessionExtension) -> Json<Value> {
+    let (url, state) = app
         .github_oauth
         .authorize_url(oauth2::CsrfToken::new_random)
         .add_scope(Scope::new("read:org".to_string()))
         .url();
-    let state = state.secret().to_string();
-    req.session_mut()
-        .insert("github_oauth_state".to_string(), state.clone());
 
-    Ok(req.json(&json!({ "url": url.to_string(), "state": state })))
+    let state = state.secret().to_string();
+    session.insert("github_oauth_state".to_string(), state.clone());
+
+    Json(json!({ "url": url.to_string(), "state": state }))
+}
+
+#[derive(Clone, Debug, Deserialize, FromRequestParts)]
+#[from_request(via(Query))]
+pub struct AuthorizeQuery {
+    code: AuthorizationCode,
+    state: CsrfToken,
 }
 
 /// Handles the `GET /api/private/session/authorize` route.
@@ -67,53 +77,55 @@ pub fn begin(req: &mut dyn RequestExt) -> EndpointResult {
 ///     }
 /// }
 /// ```
-pub fn authorize(req: &mut dyn RequestExt) -> EndpointResult {
-    // Parse the url query
-    let mut query = req.query();
-    let code = query.remove("code").unwrap_or_default();
-    let state = query.remove("state").unwrap_or_default();
+pub async fn authorize(
+    query: AuthorizeQuery,
+    app: AppState,
+    session: SessionExtension,
+    req: Parts,
+) -> AppResult<Json<EncodableMe>> {
+    let app_clone = app.clone();
+    let request_log = req.request_log().clone();
 
-    // Make sure that the state we just got matches the session state that we
-    // should have issued earlier.
-    {
-        let session_state = req.session_mut().remove(&"github_oauth_state".to_string());
-        let session_state = session_state.as_deref();
-        if Some(&state[..]) != session_state {
+    spawn_blocking(move || {
+        // Make sure that the state we just got matches the session state that we
+        // should have issued earlier.
+        let session_state = session.remove("github_oauth_state").map(CsrfToken::new);
+        if !session_state.is_some_and(|state| query.state.secret() == state.secret()) {
             return Err(bad_request("invalid state parameter"));
         }
-    }
 
-    // Fetch the access token from GitHub using the code we just got
-    let code = AuthorizationCode::new(code);
-    let token = req
-        .app()
-        .github_oauth
-        .exchange_code(code)
-        .request(http_client)
-        .map_err(|err| err.chain(server_error("Error obtaining token")))?;
-    let token = token.access_token();
+        // Fetch the access token from GitHub using the code we just got
+        let token = app
+            .github_oauth
+            .exchange_code(query.code)
+            .request(http_client)
+            .map_err(|err| {
+                request_log.add("cause", err);
+                server_error("Error obtaining token")
+            })?;
 
-    // Fetch the user info from GitHub using the access token we just got and create a user record
-    let ghuser = req.app().github.current_user(token)?;
-    let user = save_user_to_database(
-        &ghuser,
-        token.secret(),
-        &req.app().emails,
-        &*req.db_write()?,
-    )?;
+        let token = token.access_token();
 
-    // Log in by setting a cookie and the middleware authentication
-    req.session_mut()
-        .insert("user_id".to_string(), user.id.to_string());
+        // Fetch the user info from GitHub using the access token we just got and create a user record
+        let ghuser = Handle::current().block_on(app.github.current_user(token))?;
+        let user =
+            save_user_to_database(&ghuser, token.secret(), &app.emails, &mut *app.db_write()?)?;
 
-    super::me::me(req)
+        // Log in by setting a cookie and the middleware authentication
+        session.insert("user_id".to_string(), user.id.to_string());
+
+        Ok(())
+    })
+    .await?;
+
+    super::me::me(app_clone, req).await
 }
 
 fn save_user_to_database(
     user: &GithubUser,
     access_token: &str,
     emails: &Emails,
-    conn: &PgConnection,
+    conn: &mut PgConnection,
 ) -> AppResult<User> {
     NewUser::new(
         user.id,
@@ -124,7 +136,7 @@ fn save_user_to_database(
     )
     .create_or_update(user.email.as_deref(), emails, conn)
     .map_err(Into::into)
-    .or_else(|e: Box<dyn AppError>| {
+    .or_else(|e: BoxedAppError| {
         // If we're in read only mode, we can't update their details
         // just look for an existing user
         if e.is::<ReadOnlyMode>() {
@@ -140,25 +152,20 @@ fn save_user_to_database(
 }
 
 /// Handles the `DELETE /api/private/session` route.
-pub fn logout(req: &mut dyn RequestExt) -> EndpointResult {
-    req.session_mut().remove(&"user_id".to_string());
-    Ok(req.json(&true))
+pub async fn logout(session: SessionExtension) -> Json<bool> {
+    session.remove("user_id");
+    Json(true)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn pg_connection() -> PgConnection {
-        let database_url =
-            dotenv::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set to run tests");
-        PgConnection::establish(&database_url).unwrap()
-    }
+    use crate::test_util::test_db_connection;
 
     #[test]
     fn gh_user_with_invalid_email_doesnt_fail() {
         let emails = Emails::new_in_memory();
-        let conn = pg_connection();
+        let (_test_db, conn) = &mut test_db_connection();
         let gh_user = GithubUser {
             email: Some("String.Format(\"{0}.{1}@live.com\", FirstName, LastName)".into()),
             name: Some("My Name".into()),
@@ -166,12 +173,11 @@ mod tests {
             id: -1,
             avatar_url: None,
         };
-        let result = save_user_to_database(&gh_user, "arbitrary_token", &emails, &conn);
+        let result = save_user_to_database(&gh_user, "arbitrary_token", &emails, conn);
 
         assert!(
             result.is_ok(),
-            "Creating a User from a GitHub user failed when it shouldn't have, {:?}",
-            result
+            "Creating a User from a GitHub user failed when it shouldn't have, {result:?}"
         );
     }
 }

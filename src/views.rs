@@ -1,31 +1,17 @@
 use chrono::NaiveDateTime;
-use std::collections::HashMap;
-use url::Url;
+use secrecy::ExposeSecret;
 
-use crate::github;
+use crate::external_urls::remove_blocked_urls;
 use crate::models::{
-    Badge, Category, Crate, CrateOwnerInvitation, CreatedApiToken, Dependency, DependencyKind,
+    ApiToken, Category, Crate, CrateOwnerInvitation, CreatedApiToken, Dependency, DependencyKind,
     Keyword, Owner, ReverseDependency, Team, TopVersions, User, Version, VersionDownload,
     VersionOwnerAction,
 };
 use crate::util::rfc3339;
+use crates_io_github as github;
 
-/// Hosts in this list are known to not be hosting documentation,
-/// and are possibly of malicious intent e.g. ad tracking networks, etc.
-const DOCUMENTATION_BLOCKLIST: &[&str] = &["rust-ci.org", "rustless.org", "ironframework.io"];
-
-#[derive(PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct EncodableBadge {
-    pub badge_type: String,
-    pub attributes: HashMap<String, Option<String>>,
-}
-
-impl From<Badge> for EncodableBadge {
-    fn from(badge: Badge) -> Self {
-        // The serde attributes on Badge ensure it can be deserialized to EncodableBadge
-        serde_json::from_value(serde_json::to_value(badge).unwrap()).unwrap()
-    }
-}
+pub mod krate_publish;
+pub use self::krate_publish::{EncodableCrateDependency, PublishMetadata};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct EncodableCategory {
@@ -216,11 +202,11 @@ pub struct EncodableCrate {
     pub versions: Option<Vec<i32>>,
     pub keywords: Option<Vec<String>>,
     pub categories: Option<Vec<String>>,
-    pub badges: Option<Vec<EncodableBadge>>,
+    pub badges: Option<Vec<()>>,
     #[serde(with = "rfc3339")]
     pub created_at: NaiveDateTime,
     // NOTE: Used by shields.io, altering `downloads` requires a PR with shields.io
-    pub downloads: i32,
+    pub downloads: i64,
     pub recent_downloads: Option<i64>,
     // NOTE: Used by shields.io, altering `max_version` requires a PR with shields.io
     pub max_version: String,
@@ -242,7 +228,7 @@ impl EncodableCrate {
         versions: Option<Vec<i32>>,
         keywords: Option<&[Keyword]>,
         categories: Option<&[Category]>,
-        badges: Option<Vec<Badge>>,
+        badges: Option<Vec<()>>,
         exact_match: bool,
         recent_downloads: Option<i64>,
     ) -> Self {
@@ -264,7 +250,9 @@ impl EncodableCrate {
         let keyword_ids = keywords.map(|kws| kws.iter().map(|kw| kw.keyword.clone()).collect());
         let category_ids = categories.map(|cats| cats.iter().map(|cat| cat.slug.clone()).collect());
         let badges = badges.map(|_| vec![]);
-        let documentation = Self::remove_blocked_documentation_urls(documentation);
+        let homepage = remove_blocked_urls(homepage);
+        let documentation = remove_blocked_urls(documentation);
+        let repository = remove_blocked_urls(repository);
 
         let max_version = top_versions
             .and_then(|v| v.highest.as_ref())
@@ -279,6 +267,17 @@ impl EncodableCrate {
         let max_stable_version = top_versions
             .and_then(|v| v.highest_stable.as_ref())
             .map(|v| v.to_string());
+
+        // the total number of downloads is eventually consistent, but can lag
+        // behind the number of "recent downloads". to hide this inconsistency
+        // we will use the "recent downloads" as "total downloads" in case it is
+        // higher.
+        let downloads = downloads as i64;
+        let downloads = if matches!(recent_downloads, Some(x) if x > downloads) {
+            recent_downloads.unwrap()
+        } else {
+            downloads
+        };
 
         EncodableCrate {
             id: name.clone(),
@@ -313,7 +312,7 @@ impl EncodableCrate {
     pub fn from_minimal(
         krate: Crate,
         top_versions: Option<&TopVersions>,
-        badges: Option<Vec<Badge>>,
+        badges: Option<Vec<()>>,
         exact_match: bool,
         recent_downloads: Option<i64>,
     ) -> Self {
@@ -327,34 +326,6 @@ impl EncodableCrate {
             exact_match,
             recent_downloads,
         )
-    }
-
-    /// Return `None` if the documentation URL host matches a blocked host
-    fn remove_blocked_documentation_urls(url: Option<String>) -> Option<String> {
-        // Handles if documentation URL is None
-        let url = match url {
-            Some(url) => url,
-            None => return None,
-        };
-
-        // Handles unsuccessful parsing of documentation URL
-        let parsed_url = match Url::parse(&url) {
-            Ok(parsed_url) => parsed_url,
-            Err(_) => return None,
-        };
-
-        // Extract host string from documentation URL
-        let url_host = match parsed_url.host_str() {
-            Some(url_host) => url_host,
-            None => return None,
-        };
-
-        // Match documentation URL host against blocked host array elements
-        if DOCUMENTATION_BLOCKLIST.contains(&url_host) {
-            None
-        } else {
-            Some(url)
-        }
     }
 }
 
@@ -452,27 +423,19 @@ impl From<Team> for EncodableTeam {
 /// The serialization format for the `ApiToken` model with its token value.
 /// This should only be used when initially creating a new token to minimize
 /// the chance of token leaks.
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Serialize, Debug)]
 pub struct EncodableApiTokenWithToken {
-    pub id: i32,
-    pub name: String,
-    pub token: String,
-    pub revoked: bool,
-    #[serde(with = "rfc3339")]
-    pub created_at: NaiveDateTime,
-    #[serde(with = "rfc3339::option")]
-    pub last_used_at: Option<NaiveDateTime>,
+    #[serde(flatten)]
+    pub token: ApiToken,
+    #[serde(rename = "token")]
+    pub plaintext: String,
 }
 
 impl From<CreatedApiToken> for EncodableApiTokenWithToken {
     fn from(token: CreatedApiToken) -> Self {
         EncodableApiTokenWithToken {
-            id: token.model.id,
-            name: token.model.name,
-            token: token.plaintext,
-            revoked: token.model.revoked,
-            created_at: token.model.created_at,
-            last_used_at: token.model.last_used_at,
+            token: token.model,
+            plaintext: token.plaintext.expose_secret().clone(),
         }
     }
 }
@@ -503,7 +466,7 @@ pub struct EncodablePrivateUser {
     pub email: Option<String>,
     pub avatar: Option<String>,
     pub url: Option<String>,
-    pub admin: bool,
+    pub is_admin: bool,
 }
 
 impl EncodablePrivateUser {
@@ -514,12 +477,12 @@ impl EncodablePrivateUser {
         email_verified: bool,
         email_verification_sent: bool,
     ) -> Self {
-        let admin = user.admin().is_ok();
         let User {
             id,
             name,
             gh_login,
             gh_avatar,
+            is_admin,
             ..
         } = user;
         let url = format!("https://github.com/{gh_login}");
@@ -533,7 +496,7 @@ impl EncodablePrivateUser {
             login: gh_login,
             name,
             url: Some(url),
-            admin,
+            is_admin,
         }
     }
 }
@@ -546,7 +509,7 @@ pub struct EncodablePublicUser {
     pub login: String,
     pub name: Option<String>,
     pub avatar: Option<String>,
-    pub url: Option<String>,
+    pub url: String,
 }
 
 /// Converts a `User` model into an `EncodablePublicUser` for JSON serialization.
@@ -565,7 +528,7 @@ impl From<User> for EncodablePublicUser {
             avatar: gh_avatar,
             login: gh_login,
             name,
-            url: Some(url),
+            url,
         }
     }
 }
@@ -601,6 +564,7 @@ pub struct EncodableVersion {
     pub published_by: Option<EncodablePublicUser>,
     pub audit_actions: Vec<EncodableAuditAction>,
     pub checksum: String,
+    pub rust_version: Option<String>,
 }
 
 impl EncodableVersion {
@@ -621,6 +585,7 @@ impl EncodableVersion {
             license,
             crate_size,
             checksum,
+            rust_version,
             ..
         } = version;
 
@@ -645,6 +610,7 @@ impl EncodableVersion {
             links,
             crate_size,
             checksum,
+            rust_version,
             published_by: published_by.map(User::into),
             audit_actions: audit_actions
                 .into_iter()
@@ -679,9 +645,6 @@ pub struct PublishWarnings {
     pub other: Vec<String>,
 }
 
-pub mod krate_publish;
-pub use self::krate_publish::{EncodableCrateDependency, EncodableCrateUpload};
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -695,7 +658,10 @@ mod tests {
             slug: "".to_string(),
             description: "".to_string(),
             crates_cnt: 1,
-            created_at: NaiveDate::from_ymd(2017, 1, 6).and_hms(14, 23, 11),
+            created_at: NaiveDate::from_ymd_opt(2017, 1, 6)
+                .unwrap()
+                .and_hms_opt(14, 23, 11)
+                .unwrap(),
         };
         let json = serde_json::to_string(&cat).unwrap();
         assert_some!(json
@@ -711,7 +677,10 @@ mod tests {
             slug: "".to_string(),
             description: "".to_string(),
             crates_cnt: 1,
-            created_at: NaiveDate::from_ymd(2017, 1, 6).and_hms(14, 23, 11),
+            created_at: NaiveDate::from_ymd_opt(2017, 1, 6)
+                .unwrap()
+                .and_hms_opt(14, 23, 11)
+                .unwrap(),
             subcategories: vec![],
             parent_categories: vec![],
         };
@@ -726,7 +695,10 @@ mod tests {
         let key = EncodableKeyword {
             id: "".to_string(),
             keyword: "".to_string(),
-            created_at: NaiveDate::from_ymd(2017, 1, 6).and_hms(14, 23, 11),
+            created_at: NaiveDate::from_ymd_opt(2017, 1, 6)
+                .unwrap()
+                .and_hms_opt(14, 23, 11)
+                .unwrap(),
             crates_cnt: 0,
         };
         let json = serde_json::to_string(&key).unwrap();
@@ -743,8 +715,14 @@ mod tests {
             num: "".to_string(),
             dl_path: "".to_string(),
             readme_path: "".to_string(),
-            updated_at: NaiveDate::from_ymd(2017, 1, 6).and_hms(14, 23, 11),
-            created_at: NaiveDate::from_ymd(2017, 1, 6).and_hms(14, 23, 12),
+            updated_at: NaiveDate::from_ymd_opt(2017, 1, 6)
+                .unwrap()
+                .and_hms_opt(14, 23, 11)
+                .unwrap(),
+            created_at: NaiveDate::from_ymd_opt(2017, 1, 6)
+                .unwrap()
+                .and_hms_opt(14, 23, 12)
+                .unwrap(),
             downloads: 0,
             features: serde_json::from_str("{}").unwrap(),
             yanked: false,
@@ -756,6 +734,7 @@ mod tests {
             },
             crate_size: Some(1234),
             checksum: String::new(),
+            rust_version: None,
             published_by: None,
             audit_actions: vec![EncodableAuditAction {
                 action: "publish".to_string(),
@@ -764,9 +743,12 @@ mod tests {
                     login: String::new(),
                     name: None,
                     avatar: None,
-                    url: None,
+                    url: String::new(),
                 },
-                time: NaiveDate::from_ymd(2017, 1, 6).and_hms(14, 23, 12),
+                time: NaiveDate::from_ymd_opt(2017, 1, 6)
+                    .unwrap()
+                    .and_hms_opt(14, 23, 12)
+                    .unwrap(),
             }],
         };
         let json = serde_json::to_string(&ver).unwrap();
@@ -784,12 +766,18 @@ mod tests {
         let crt = EncodableCrate {
             id: "".to_string(),
             name: "".to_string(),
-            updated_at: NaiveDate::from_ymd(2017, 1, 6).and_hms(14, 23, 11),
+            updated_at: NaiveDate::from_ymd_opt(2017, 1, 6)
+                .unwrap()
+                .and_hms_opt(14, 23, 11)
+                .unwrap(),
             versions: None,
             keywords: None,
             categories: None,
             badges: None,
-            created_at: NaiveDate::from_ymd(2017, 1, 6).and_hms(14, 23, 12),
+            created_at: NaiveDate::from_ymd_opt(2017, 1, 6)
+                .unwrap()
+                .and_hms_opt(14, 23, 12)
+                .unwrap(),
             downloads: 0,
             recent_downloads: None,
             max_version: "".to_string(),
@@ -826,8 +814,14 @@ mod tests {
             invited_by_username: "".to_string(),
             crate_name: "".to_string(),
             crate_id: 123,
-            created_at: NaiveDate::from_ymd(2017, 1, 6).and_hms(14, 23, 11),
-            expires_at: NaiveDate::from_ymd(2020, 10, 24).and_hms(16, 30, 00),
+            created_at: NaiveDate::from_ymd_opt(2017, 1, 6)
+                .unwrap()
+                .and_hms_opt(14, 23, 11)
+                .unwrap(),
+            expires_at: NaiveDate::from_ymd_opt(2020, 10, 24)
+                .unwrap()
+                .and_hms_opt(16, 30, 00)
+                .unwrap(),
         };
         let json = serde_json::to_string(&inv).unwrap();
         assert_some!(json
@@ -836,41 +830,5 @@ mod tests {
         assert_some!(json
             .as_str()
             .find(r#""expires_at":"2020-10-24T16:30:00+00:00""#));
-    }
-
-    #[test]
-    fn documentation_blocked_no_url_provided() {
-        assert_eq!(
-            EncodableCrate::remove_blocked_documentation_urls(None),
-            None
-        );
-    }
-
-    #[test]
-    fn documentation_blocked_invalid_url() {
-        assert_eq!(
-            EncodableCrate::remove_blocked_documentation_urls(Some(String::from("not a url"))),
-            None
-        );
-    }
-
-    #[test]
-    fn documentation_blocked_url_contains_partial_match() {
-        assert_eq!(
-            EncodableCrate::remove_blocked_documentation_urls(Some(String::from(
-                "http://rust-ci.organists.com"
-            )),),
-            Some(String::from("http://rust-ci.organists.com"))
-        );
-    }
-
-    #[test]
-    fn documentation_blocked_url() {
-        assert_eq!(
-            EncodableCrate::remove_blocked_documentation_urls(Some(String::from(
-                "http://rust-ci.org/crate/crate-0.1/doc/crate-0.1",
-            ),),),
-            None
-        );
     }
 }

@@ -1,4 +1,4 @@
-use cargo_registry::{
+use crates_io::{
     models::{Category, Crate, Keyword, NewCrate},
     schema::{crates, version_downloads},
     util::errors::AppResult,
@@ -111,12 +111,15 @@ impl<'a> CrateBuilder<'a> {
         self
     }
 
-    pub fn build(mut self, connection: &PgConnection) -> AppResult<Crate> {
+    pub fn max_features(mut self, max_features: i16) -> Self {
+        self.krate.max_features = Some(max_features);
+        self
+    }
+
+    pub fn build(mut self, connection: &mut PgConnection) -> AppResult<Crate> {
         use diesel::{insert_into, select, update};
 
-        let mut krate = self
-            .krate
-            .create_or_update(connection, self.owner_id, None)?;
+        let mut krate = self.krate.create(connection, self.owner_id)?;
 
         // Since we are using `NewCrate`, we can't set all the
         // crate properties in a single DB call.
@@ -124,7 +127,7 @@ impl<'a> CrateBuilder<'a> {
         if let Some(downloads) = self.downloads {
             krate = update(&krate)
                 .set(crates::downloads.eq(downloads))
-                .returning(cargo_registry::models::krate::ALL_COLUMNS)
+                .returning(Crate::as_returning())
                 .get_result(connection)?;
         }
 
@@ -147,8 +150,8 @@ impl<'a> CrateBuilder<'a> {
                 ))
                 .execute(connection)?;
 
-            no_arg_sql_function!(refresh_recent_crate_downloads, ());
-            select(refresh_recent_crate_downloads).execute(connection)?;
+            sql_function!(fn refresh_recent_crate_downloads());
+            select(refresh_recent_crate_downloads()).execute(connection)?;
         }
 
         if !self.categories.is_empty() {
@@ -162,7 +165,7 @@ impl<'a> CrateBuilder<'a> {
         if let Some(updated_at) = self.updated_at {
             krate = update(&krate)
                 .set(crates::updated_at.eq(updated_at))
-                .returning(cargo_registry::models::krate::ALL_COLUMNS)
+                .returning(Crate::as_returning())
                 .get_result(connection)?;
         }
 
@@ -175,10 +178,10 @@ impl<'a> CrateBuilder<'a> {
     ///
     /// Panics (and fails the test) if any part of inserting the crate record fails.
     #[track_caller]
-    pub fn expect_build(self, connection: &PgConnection) -> Crate {
+    pub fn expect_build(self, connection: &mut PgConnection) -> Crate {
         let name = self.krate.name;
         self.build(connection).unwrap_or_else(|e| {
-            panic!("Unable to create crate {}: {:?}", name, e);
+            panic!("Unable to create crate {name}: {e:?}");
         })
     }
 }

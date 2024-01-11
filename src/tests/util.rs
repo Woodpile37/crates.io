@@ -20,30 +20,39 @@
 //! to the underlying database model value (`User` and `ApiToken` respectively).
 
 use crate::{
-    builders::PublishBuilder, CategoryListResponse, CategoryResponse, CrateList, CrateResponse,
-    GoodCrate, OkBool, OwnersResponse, VersionResponse,
+    CategoryListResponse, CategoryResponse, CrateList, CrateResponse, GoodCrate, OkBool,
+    OwnersResponse, VersionResponse,
 };
-use cargo_registry::models::{ApiToken, CreatedApiToken, User};
+use crates_io::middleware::session;
+use crates_io::models::{ApiToken, CreatedApiToken, User};
 
-use conduit::{BoxError, Handler, Method};
-use conduit_cookie::SessionMiddleware;
-use conduit_test::MockRequest;
+use http::{Method, Request};
 
-use conduit::header;
+use axum::body::{Body, Bytes};
+use axum::extract::connect_info::MockConnectInfo;
+use chrono::NaiveDateTime;
 use cookie::Cookie;
+use crates_io::models::token::{CrateScope, EndpointScope};
+use crates_io::util::token::PlainToken;
+use http::header;
+use secrecy::ExposeSecret;
 use std::collections::HashMap;
+use std::net::SocketAddr;
+use tower::ServiceExt;
 
 mod chaosproxy;
-mod fresh_schema;
 mod github;
 pub mod insta;
+pub mod matchers;
+mod mock_request;
 mod response;
 mod test_app;
 
 pub(crate) use chaosproxy::ChaosProxy;
-pub(crate) use fresh_schema::FreshSchema;
+use mock_request::MockRequest;
+pub use mock_request::MockRequestExt;
 pub use response::Response;
-pub use test_app::{TestApp, TestDatabase};
+pub use test_app::TestApp;
 
 /// This function can be used to create a `Cookie` header for mock requests that
 /// include cookie-based authentication.
@@ -53,23 +62,22 @@ pub use test_app::{TestApp, TestDatabase};
 /// request.header(header::COOKIE, &cookie);
 /// ```
 ///
-/// The implementation matches roughly what is happening inside of the
-/// `SessionMiddleware` from `conduit_cookie`.
-pub fn encode_session_header(session_key: &str, user_id: i32) -> String {
+/// The implementation matches roughly what is happening inside of our
+/// session middleware.
+pub fn encode_session_header(session_key: &cookie::Key, user_id: i32) -> String {
     let cookie_name = "cargo_session";
-    let cookie_key = cookie::Key::derive_from(session_key.as_bytes());
 
     // build session data map
     let mut map = HashMap::new();
     map.insert("user_id".into(), user_id.to_string());
 
     // encode the map into a cookie value string
-    let encoded = SessionMiddleware::encode(&map);
+    let encoded = session::encode(&map);
 
     // put the cookie into a signed cookie jar
-    let cookie = Cookie::build(cookie_name, encoded).finish();
+    let cookie = Cookie::build((cookie_name, encoded));
     let mut jar = cookie::CookieJar::new();
-    jar.signed_mut(&cookie_key).add(cookie);
+    jar.signed_mut(session_key).add(cookie);
 
     // read the raw cookie from the cookie jar
     jar.get(cookie_name).unwrap().to_string()
@@ -84,19 +92,34 @@ pub trait RequestHelper {
 
     /// Run a request that is expected to succeed
     #[track_caller]
-    fn run<T>(&self, mut request: MockRequest) -> Response<T> {
-        Response::new(self.app().as_middleware().call(&mut request))
-    }
+    fn run<T>(&self, request: Request<impl Into<Body>>) -> Response<T> {
+        let app = self.app();
+        let rt = app.runtime();
+        let router = app.router().clone();
 
-    /// Run a request that is expected to error
-    #[track_caller]
-    fn run_err(&self, mut request: MockRequest) -> BoxError {
-        self.app().as_middleware().call(&mut request).err().unwrap()
+        // Add a mock `SocketAddr` to the requests so that the `ConnectInfo`
+        // extractor has something to extract.
+        let mocket_addr = SocketAddr::from(([127, 0, 0, 1], 52381));
+        let router = router.layer(MockConnectInfo(mocket_addr));
+
+        let request = request.map(Into::into);
+        let axum_response = rt.block_on(router.oneshot(request)).unwrap();
+
+        let (parts, body) = axum_response.into_parts();
+        let bytes = rt.block_on(axum::body::to_bytes(body, usize::MAX)).unwrap();
+        let bytes_response = axum::response::Response::from_parts(parts, bytes);
+
+        Response::new(bytes_response)
     }
 
     /// Create a get request
     fn get_request(&self, path: &str) -> MockRequest {
         self.request_builder(Method::GET, path)
+    }
+
+    /// Create a POST request
+    fn post_request(&self, path: &str) -> MockRequest {
+        self.request_builder(Method::POST, path)
     }
 
     /// Issue a GET request
@@ -105,27 +128,26 @@ pub trait RequestHelper {
         self.run(self.get_request(path))
     }
 
-    /// Issue a GET request with a query string
-    #[track_caller]
-    fn get_query<T>(&self, path: &str, query: &str) -> Response<T> {
-        let mut req = self.get_request(path);
-        req.with_query(query);
-        self.run(req)
-    }
-
     /// Issue a GET request that includes query parameters
     #[track_caller]
     fn get_with_query<T>(&self, path: &str, query: &str) -> Response<T> {
-        let mut request = self.request_builder(Method::GET, path);
-        request.with_query(query);
+        let path_and_query = format!("{path}?{query}");
+        let request = self.request_builder(Method::GET, &path_and_query);
         self.run(request)
     }
 
     /// Issue a PUT request
     #[track_caller]
-    fn put<T>(&self, path: &str, body: &[u8]) -> Response<T> {
+    fn put<T>(&self, path: &str, body: impl Into<Bytes>) -> Response<T> {
+        let body = body.into();
+        let is_json = body.starts_with(b"{") && body.ends_with(b"}");
+
         let mut request = self.request_builder(Method::PUT, path);
-        request.with_body(body);
+        *request.body_mut() = body;
+        if is_json {
+            request.header(header::CONTENT_TYPE, "application/json");
+        }
+
         self.run(request)
     }
 
@@ -138,9 +160,16 @@ pub trait RequestHelper {
 
     /// Issue a DELETE request with a body... yes we do it, for crate owner removal
     #[track_caller]
-    fn delete_with_body<T>(&self, path: &str, body: &[u8]) -> Response<T> {
+    fn delete_with_body<T>(&self, path: &str, body: impl Into<Bytes>) -> Response<T> {
+        let body = body.into();
+        let is_json = body.starts_with(b"{") && body.ends_with(b"}");
+
         let mut request = self.request_builder(Method::DELETE, path);
-        request.with_body(body);
+        *request.body_mut() = body;
+        if is_json {
+            request.header(header::CONTENT_TYPE, "application/json");
+        }
+
         self.run(request)
     }
 
@@ -158,8 +187,8 @@ pub trait RequestHelper {
     ///
     /// Background jobs will publish to the git index and sync to the HTTP index.
     #[track_caller]
-    fn publish_crate(&self, publish_builder: PublishBuilder) -> Response<GoodCrate> {
-        let response = self.put("/api/v1/crates/new", &publish_builder.body());
+    fn publish_crate(&self, body: impl Into<Bytes>) -> Response<GoodCrate> {
+        let response = self.put("/api/v1/crates/new", body);
         self.app().run_pending_background_jobs();
         response
     }
@@ -173,7 +202,7 @@ pub trait RequestHelper {
     /// Request the JSON used for a crate's minimal page
     fn show_crate_minimal(&self, krate_name: &str) -> CrateResponse {
         let url = format!("/api/v1/crates/{krate_name}");
-        self.get_query(&url, "include=").good()
+        self.get_with_query(&url, "include=").good()
     }
 
     /// Request the JSON used to list a crate's owners
@@ -199,11 +228,13 @@ pub trait RequestHelper {
     }
 }
 
-fn req(method: conduit::Method, path: &str) -> MockRequest {
-    let mut request = MockRequest::new(method, path);
-    request.header(header::USER_AGENT, "conduit-test");
-    request.header("x-real-ip", "127.0.0.1");
-    request
+fn req(method: Method, path: &str) -> MockRequest {
+    Request::builder()
+        .method(method)
+        .uri(path)
+        .header(header::USER_AGENT, "conduit-test")
+        .body(Bytes::new())
+        .unwrap()
 }
 
 /// A type that can generate unauthenticated requests
@@ -222,9 +253,6 @@ impl RequestHelper for MockAnonymousUser {
 }
 
 /// A type that can generate cookie authenticated requests
-///
-/// The `user.id` value is directly injected into a request extension and thus the conduit_cookie
-/// session logic is not exercised.
 pub struct MockCookieUser {
     app: TestApp,
     user: User,
@@ -263,9 +291,30 @@ impl MockCookieUser {
     ///
     /// This method updates the database directly
     pub fn db_new_token(&self, name: &str) -> MockTokenUser {
-        let token = self
-            .app
-            .db(|conn| ApiToken::insert(conn, self.user.id, name).unwrap());
+        self.db_new_scoped_token(name, None, None, None)
+    }
+
+    /// Creates a scoped token and wraps it in a helper struct
+    ///
+    /// This method updates the database directly
+    pub fn db_new_scoped_token(
+        &self,
+        name: &str,
+        crate_scopes: Option<Vec<CrateScope>>,
+        endpoint_scopes: Option<Vec<EndpointScope>>,
+        expired_at: Option<NaiveDateTime>,
+    ) -> MockTokenUser {
+        let token = self.app.db(|conn| {
+            ApiToken::insert_with_scopes(
+                conn,
+                self.user.id,
+                name,
+                crate_scopes,
+                endpoint_scopes,
+                expired_at,
+            )
+            .unwrap()
+        });
         MockTokenUser {
             app: self.app.clone(),
             token,
@@ -282,7 +331,7 @@ pub struct MockTokenUser {
 impl RequestHelper for MockTokenUser {
     fn request_builder(&self, method: Method, path: &str) -> MockRequest {
         let mut request = req(method, path);
-        request.header(header::AUTHORIZATION, &self.token.plaintext);
+        request.header(header::AUTHORIZATION, self.token.plaintext.expose_secret());
         request
     }
 
@@ -297,13 +346,15 @@ impl MockTokenUser {
         &self.token.model
     }
 
-    pub fn plaintext(&self) -> &str {
+    pub fn plaintext(&self) -> &PlainToken {
         &self.token.plaintext
     }
 
     /// Add to the specified crate the specified owners.
     pub fn add_named_owners(&self, krate_name: &str, owners: &[&str]) -> Response<OkBool> {
-        self.modify_owners(krate_name, owners, Self::put)
+        let url = format!("/api/v1/crates/{krate_name}/owners");
+        let body = json!({ "owners": owners }).to_string();
+        self.put(&url, body)
     }
 
     /// Add a single owner to the specified crate.
@@ -313,7 +364,9 @@ impl MockTokenUser {
 
     /// Remove from the specified crate the specified owners.
     pub fn remove_named_owners(&self, krate_name: &str, owners: &[&str]) -> Response<OkBool> {
-        self.modify_owners(krate_name, owners, Self::delete_with_body)
+        let url = format!("/api/v1/crates/{krate_name}/owners");
+        let body = json!({ "owners": owners }).to_string();
+        self.delete_with_body(&url, body)
     }
 
     /// Remove a single owner to the specified crate.
@@ -321,22 +374,8 @@ impl MockTokenUser {
         self.remove_named_owners(krate_name, &[owner])
     }
 
-    fn modify_owners<F>(&self, krate_name: &str, owners: &[&str], method: F) -> Response<OkBool>
-    where
-        F: Fn(&MockTokenUser, &str, &[u8]) -> Response<OkBool>,
-    {
-        let url = format!("/api/v1/crates/{krate_name}/owners");
-        let body = json!({ "owners": owners }).to_string();
-        method(self, &url, body.as_bytes())
-    }
-
     /// Add a user as an owner for a crate.
     pub fn add_user_owner(&self, krate_name: &str, username: &str) {
         self.add_named_owner(krate_name, username).good();
     }
-}
-
-#[derive(Deserialize, Debug)]
-pub struct Error {
-    pub detail: String,
 }

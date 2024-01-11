@@ -1,9 +1,8 @@
 use crate::admin::dialoguer;
-use cargo_registry_index::{Repository, RepositoryConfig};
+use crate::storage::Storage;
+use anyhow::{anyhow, Context};
+use crates_io_index::{Repository, RepositoryConfig};
 use indicatif::{ProgressBar, ProgressIterator, ProgressStyle};
-use reqwest::blocking::Client;
-
-use crate::config;
 
 #[derive(clap::Parser, Debug)]
 #[command(
@@ -16,12 +15,10 @@ pub struct Opts {
 }
 
 pub fn run(opts: Opts) -> anyhow::Result<()> {
-    let config = config::Base::from_environment();
-    let uploader = config.uploader();
-    let client = Client::new();
+    let storage = Storage::from_environment();
 
     println!("fetching git repo");
-    let config = RepositoryConfig::from_environment();
+    let config = RepositoryConfig::from_environment()?;
     let repo = Repository::open(&config)?;
     repo.reset_head()?;
     println!("HEAD is at {}", repo.head_oid()?);
@@ -32,19 +29,35 @@ pub fn run(opts: Opts) -> anyhow::Result<()> {
         return Ok(());
     }
 
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("Failed to initialize tokio runtime")?;
+
     let pb = ProgressBar::new(files.len() as u64);
-    pb.set_style(ProgressStyle::with_template("{bar:60} ({pos}/{len}, ETA {eta})").unwrap());
+    pb.set_style(ProgressStyle::with_template(
+        "{bar:60} ({pos}/{len}, ETA {eta})",
+    )?);
 
     for file in files.iter().progress_with(pb.clone()) {
-        let crate_name = file.file_name().unwrap().to_str().unwrap();
+        let file_name = file.file_name().ok_or_else(|| {
+            let file = file.display();
+            anyhow!("Failed to get file name from path: {file}")
+        })?;
+
+        let crate_name = file_name.to_str().ok_or_else(|| {
+            let file_name = file_name.to_string_lossy();
+            anyhow!("Failed to convert file name to utf8: {file_name}",)
+        })?;
+
         let path = repo.index_file(crate_name);
         if !path.exists() {
-            pb.suspend(|| println!("skipping file `{}`", crate_name));
+            pb.suspend(|| println!("skipping file `{crate_name}`"));
             continue;
         }
 
         let contents = std::fs::read_to_string(&path)?;
-        uploader.upload_index(&client, crate_name, contents)?;
+        rt.block_on(storage.sync_index(crate_name, Some(contents)))?;
     }
 
     println!(

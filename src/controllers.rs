@@ -10,49 +10,37 @@ mod frontend_prelude {
 
 mod prelude {
     pub use super::helpers::ok_true;
+    pub use axum::extract::Path;
+    pub use axum::response::{IntoResponse, Response};
+    pub use axum::Json;
     pub use diesel::prelude::*;
+    pub use serde_json::Value;
 
-    pub use conduit::{header, RequestExt, StatusCode};
-    pub use conduit_router::RequestParams;
+    pub use http::{header, request::Parts, Request, StatusCode};
 
-    pub use crate::db::RequestTransaction;
+    pub use crate::app::AppState;
+    use crate::controllers::util::RequestPartsExt;
     pub use crate::middleware::app::RequestApp;
-    pub use crate::util::errors::{cargo_err, AppError, AppResult}; // TODO: Remove cargo_err from here
-    pub use crate::util::{AppResponse, EndpointResult};
-
+    pub use crate::tasks::spawn_blocking;
+    pub use crate::util::errors::{cargo_err, AppResult, BoxedAppError};
+    pub use crate::util::BytesRequest;
     use indexmap::IndexMap;
-    use serde::Serialize;
 
-    pub trait UserAuthenticationExt {
-        fn authenticate(&mut self) -> AppResult<super::util::AuthenticatedUser>;
+    pub fn redirect(url: String) -> Response {
+        (StatusCode::FOUND, [(header::LOCATION, url)]).into_response()
     }
 
     pub trait RequestUtils {
-        fn redirect(&self, url: String) -> AppResponse;
-
-        fn json<T: Serialize>(&self, t: &T) -> AppResponse;
         fn query(&self) -> IndexMap<String, String>;
         fn wants_json(&self) -> bool;
         fn query_with_params(&self, params: IndexMap<String, String>) -> String;
     }
 
-    impl<'a> RequestUtils for dyn RequestExt + 'a {
-        fn json<T: Serialize>(&self, t: &T) -> AppResponse {
-            crate::util::json_response(t)
-        }
-
+    impl<T: RequestPartsExt> RequestUtils for T {
         fn query(&self) -> IndexMap<String, String> {
-            url::form_urlencoded::parse(self.query_string().unwrap_or("").as_bytes())
+            url::form_urlencoded::parse(self.uri().query().unwrap_or("").as_bytes())
                 .into_owned()
                 .collect()
-        }
-
-        fn redirect(&self, url: String) -> AppResponse {
-            conduit::Response::builder()
-                .status(StatusCode::FOUND)
-                .header(header::LOCATION, url)
-                .body(conduit::Body::empty())
-                .unwrap() // Should not panic unless url contains "\r\n"
         }
 
         fn wants_json(&self) -> bool {
@@ -74,11 +62,13 @@ mod prelude {
 }
 
 pub mod helpers;
-mod util;
+pub mod util;
 
 pub mod admin;
 pub mod category;
 pub mod crate_owner_invitation;
+pub mod git;
+pub mod github;
 pub mod keyword;
 pub mod krate;
 pub mod metrics;

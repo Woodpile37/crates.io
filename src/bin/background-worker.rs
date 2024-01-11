@@ -10,27 +10,49 @@
 //! Usage:
 //!      cargo run --bin background-worker
 
-#![warn(clippy::all, rust_2018_idioms)]
+#[macro_use]
+extern crate tracing;
 
-use cargo_registry::config;
-use cargo_registry::worker::cloudfront::CloudFront;
-use cargo_registry::{background_jobs::*, db};
-use cargo_registry_index::{Repository, RepositoryConfig};
+use anyhow::Context;
+use crates_io::cloudfront::CloudFront;
+use crates_io::db::DieselPool;
+use crates_io::fastly::Fastly;
+use crates_io::storage::Storage;
+use crates_io::team_repo::TeamRepoImpl;
+use crates_io::worker::{Environment, RunnerExt};
+use crates_io::{config, Emails};
+use crates_io::{db, ssh};
+use crates_io_env_vars::var;
+use crates_io_index::RepositoryConfig;
+use crates_io_worker::Runner;
 use diesel::r2d2;
-use reqwest::blocking::Client;
-use std::sync::{Arc, Mutex};
+use diesel::r2d2::ConnectionManager;
+use reqwest::Client;
+use secrecy::ExposeSecret;
+use std::sync::Arc;
 use std::thread::sleep;
 use std::time::Duration;
 
-fn main() {
-    println!("Booting runner");
+fn main() -> anyhow::Result<()> {
+    let _sentry = crates_io::sentry::init();
 
-    let config = config::Server::default();
-    let uploader = config.base.uploader();
+    // Initialize logging
+    crates_io::util::tracing::init();
+
+    let _span = info_span!("swirl.run");
+
+    info!("Booting runner");
+
+    let config = config::Server::from_environment()?;
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("Failed to initialize tokio runtime")?;
 
     if config.db.are_all_read_only() {
         loop {
-            println!(
+            warn!(
                 "Cannot run background jobs with a read-only pool. Please scale background_worker \
                 to 0 processes until the leader database is available."
             );
@@ -38,59 +60,60 @@ fn main() {
         }
     }
 
-    let db_url = db::connection_url(&config.db, &config.db.primary.url);
+    let db_url = db::connection_url(&config.db, config.db.primary.url.expose_secret());
 
-    let job_start_timeout = dotenv::var("BACKGROUND_JOB_TIMEOUT")
-        .unwrap_or_else(|_| "30".into())
-        .parse()
-        .expect("Invalid value for `BACKGROUND_JOB_TIMEOUT`");
+    if var("HEROKU")?.is_some() {
+        ssh::write_known_hosts_file().unwrap();
+    }
 
-    println!("Cloning index");
-
-    let repository_config = RepositoryConfig::from_environment();
-    let repository = Arc::new(Mutex::new(
-        Repository::open(&repository_config).expect("Failed to clone index"),
-    ));
-    println!("Index cloned");
+    let repository_config = RepositoryConfig::from_environment()?;
 
     let cloudfront = CloudFront::from_environment();
+    let storage = Arc::new(Storage::from_config(&config.storage));
 
-    let build_runner = || {
-        let client = Client::builder()
-            .timeout(Duration::from_secs(45))
-            .build()
-            .expect("Couldn't build client");
-        let environment = Environment::new_shared(
-            repository.clone(),
-            uploader.clone(),
-            client,
-            cloudfront.clone(),
-        );
-        let db_config = r2d2::Pool::builder().min_idle(Some(0));
-        swirl::Runner::builder(environment)
-            .connection_pool_builder(&db_url, db_config)
-            .job_start_timeout(Duration::from_secs(job_start_timeout))
-            .build()
-    };
-    let mut runner = build_runner();
+    let client = Client::builder()
+        .timeout(Duration::from_secs(45))
+        .build()
+        .expect("Couldn't build client");
 
-    println!("Runner booted, running jobs");
+    let emails = Emails::from_environment(&config);
+    let fastly = Fastly::from_environment(client.clone());
+    let team_repo = TeamRepoImpl::default();
 
-    let mut failure_count = 0;
+    let connection_pool = r2d2::Pool::builder()
+        .max_size(10)
+        .min_idle(Some(0))
+        .build_unchecked(ConnectionManager::new(db_url));
 
-    loop {
-        if let Err(e) = runner.run_all_pending_jobs() {
-            failure_count += 1;
-            if failure_count < 5 {
-                eprintln!(
-                    "Error running jobs (n = {}) -- retrying: {:?}",
-                    failure_count, e,
-                );
-                runner = build_runner();
-            } else {
-                panic!("Failed to begin running jobs 5 times. Restarting the process");
-            }
+    let environment = Environment::builder()
+        .repository_config(repository_config)
+        .cloudfront(cloudfront)
+        .fastly(fastly)
+        .storage(storage)
+        .connection_pool(DieselPool::new_background_worker(connection_pool.clone()))
+        .emails(emails)
+        .team_repo(Box::new(team_repo))
+        .build()?;
+
+    let environment = Arc::new(environment);
+
+    std::thread::spawn({
+        let environment = environment.clone();
+        move || {
+            if let Err(err) = environment.lock_index() {
+                warn!(%err, "Failed to clone index");
+            };
         }
-        sleep(Duration::from_secs(1));
-    }
+    });
+
+    let runner = Runner::new(runtime.handle(), connection_pool, environment.clone())
+        .configure_default_queue(|queue| queue.num_workers(5))
+        .configure_queue("repository", |queue| queue.num_workers(1))
+        .register_crates_io_job_types()
+        .start();
+
+    info!("Runner booted, running jobs");
+    runtime.block_on(runner.wait_for_shutdown());
+
+    Ok(())
 }

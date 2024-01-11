@@ -1,5 +1,5 @@
-use cargo_registry::schema::categories;
-
+use crates_io::schema::categories;
+use crates_io_test_db::TestDatabase;
 use diesel::*;
 
 const ALGORITHMS: &str = r#"
@@ -37,15 +37,7 @@ name = "Another"
 description = "Another category ho hum"
 "#;
 
-fn pg_connection() -> PgConnection {
-    let database_url =
-        dotenv::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set to run tests");
-    let conn = PgConnection::establish(&database_url).unwrap();
-    conn.begin_test_transaction().unwrap();
-    conn
-}
-
-fn select_slugs(conn: &PgConnection) -> Vec<String> {
+fn select_slugs(conn: &mut PgConnection) -> Vec<String> {
     categories::table
         .select(categories::slug)
         .order(categories::slug)
@@ -55,33 +47,35 @@ fn select_slugs(conn: &PgConnection) -> Vec<String> {
 
 #[test]
 fn sync_adds_new_categories() {
-    let conn = pg_connection();
+    let test_db = TestDatabase::new();
+    let mut conn = test_db.connect();
 
-    ::cargo_registry::boot::categories::sync_with_connection(ALGORITHMS_AND_SUCH, &conn).unwrap();
+    ::crates_io::boot::categories::sync_with_connection(ALGORITHMS_AND_SUCH, &mut conn).unwrap();
 
-    let categories = select_slugs(&conn);
+    let categories = select_slugs(&mut conn);
     assert_eq!(categories, vec!["algorithms", "algorithms::such"]);
 }
 
 #[test]
 fn sync_removes_missing_categories() {
-    let conn = pg_connection();
+    let test_db = TestDatabase::new();
+    let mut conn = test_db.connect();
 
-    ::cargo_registry::boot::categories::sync_with_connection(ALGORITHMS_AND_SUCH, &conn).unwrap();
-    ::cargo_registry::boot::categories::sync_with_connection(ALGORITHMS, &conn).unwrap();
+    ::crates_io::boot::categories::sync_with_connection(ALGORITHMS_AND_SUCH, &mut conn).unwrap();
+    ::crates_io::boot::categories::sync_with_connection(ALGORITHMS, &mut conn).unwrap();
 
-    let categories = select_slugs(&conn);
+    let categories = select_slugs(&mut conn);
     assert_eq!(categories, vec!["algorithms"]);
 }
 
 #[test]
 fn sync_adds_and_removes() {
-    let conn = pg_connection();
+    let test_db = TestDatabase::new();
+    let mut conn = test_db.connect();
 
-    ::cargo_registry::boot::categories::sync_with_connection(ALGORITHMS_AND_SUCH, &conn).unwrap();
-    ::cargo_registry::boot::categories::sync_with_connection(ALGORITHMS_AND_ANOTHER, &conn)
-        .unwrap();
+    ::crates_io::boot::categories::sync_with_connection(ALGORITHMS_AND_SUCH, &mut conn).unwrap();
+    ::crates_io::boot::categories::sync_with_connection(ALGORITHMS_AND_ANOTHER, &mut conn).unwrap();
 
-    let categories = select_slugs(&conn);
+    let categories = select_slugs(&mut conn);
     assert_eq!(categories, vec!["algorithms", "another"]);
 }

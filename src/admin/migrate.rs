@@ -1,7 +1,11 @@
-use anyhow::Error;
+use anyhow::{anyhow, Error};
+use diesel_migrations::{
+    embed_migrations, EmbeddedMigrations, HarnessWithOutput, MigrationHarness,
+};
 
 static CATEGORIES_TOML: &str = include_str!("../boot/categories.toml");
-diesel_migrations::embed_migrations!("./migrations");
+
+pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("./migrations");
 
 #[derive(clap::Parser, Debug, Copy, Clone)]
 #[command(
@@ -12,8 +16,8 @@ pub struct Opts;
 
 pub fn run(_opts: Opts) -> Result<(), Error> {
     let config = crate::config::DatabasePools::full_from_environment(
-        &crate::config::Base::from_environment(),
-    );
+        &crate::config::Base::from_environment()?,
+    )?;
 
     // TODO: Refactor logic so that we can also check things from App::new() here.
     // If the app will panic due to bad configuration, it is better to error in the release phase
@@ -23,7 +27,7 @@ pub fn run(_opts: Opts) -> Result<(), Error> {
         // TODO: Check `any_pending_migrations()` with a read-only connection and error if true.
         // It looks like this requires changes upstream to make this pub in `migration_macros`.
 
-        println!("==> Skipping migrations and category sync (read-only mode)");
+        warn!("Skipping migrations and category sync (read-only mode)");
 
         // The service is undergoing maintenance or mitigating an outage.
         // Exit with success to ensure configuration changes can be made.
@@ -32,13 +36,17 @@ pub fn run(_opts: Opts) -> Result<(), Error> {
     }
 
     // The primary is online, access directly via `DATABASE_URL`.
-    let conn = crate::db::oneoff_connection_with_config(&config)?;
+    let conn = &mut crate::db::oneoff_connection_with_config(&config)?;
 
-    println!("==> migrating the database");
-    embedded_migrations::run_with_output(&conn, &mut std::io::stdout())?;
+    info!("Migrating the database");
+    let mut stdout = std::io::stdout();
+    let mut harness = HarnessWithOutput::new(conn, &mut stdout);
+    harness
+        .run_pending_migrations(MIGRATIONS)
+        .map_err(|err| anyhow!("Failed to run migrations: {err}"))?;
 
-    println!("==> synchronizing crate categories");
-    crate::boot::categories::sync_with_connection(CATEGORIES_TOML, &conn).unwrap();
+    info!("Synchronizing crate categories");
+    crate::boot::categories::sync_with_connection(CATEGORIES_TOML, conn)?;
 
     Ok(())
 }

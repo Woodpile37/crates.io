@@ -7,7 +7,7 @@ import percySnapshot from '@percy/ember';
 import a11yAudit from 'ember-a11y-testing/test-support/audit';
 import { getPageTitle } from 'ember-page-title/test-support';
 
-import { setupApplicationTest } from 'cargo/tests/helpers';
+import { setupApplicationTest } from 'crates-io/tests/helpers';
 
 import { summary } from '../../mirage/route-handlers/summary';
 import axeConfig from '../axe-config';
@@ -22,8 +22,8 @@ module('Acceptance | front page', function (hooks) {
 
     await visit('/');
 
-    assert.equal(currentURL(), '/');
-    assert.equal(getPageTitle(), 'crates.io: Rust Package Registry');
+    assert.strictEqual(currentURL(), '/');
+    assert.strictEqual(getPageTitle(), 'crates.io: Rust Package Registry');
 
     assert.dom('[data-test-install-cargo-link]').exists();
     assert.dom('[data-test-all-crates-link]').exists();
@@ -39,7 +39,7 @@ module('Acceptance | front page', function (hooks) {
     assert.dom('[data-test-most-downloaded] [data-test-crate-link="0"]').hasAttribute('href', '/crates/serde');
 
     assert.dom('[data-test-just-updated] [data-test-crate-link="0"]').hasText('nanomsg v0.6.1');
-    assert.dom('[data-test-just-updated] [data-test-crate-link="0"]').hasAttribute('href', '/crates/nanomsg');
+    assert.dom('[data-test-just-updated] [data-test-crate-link="0"]').hasAttribute('href', '/crates/nanomsg/0.6.1');
 
     await percySnapshot(assert);
     await a11yAudit(axeConfig);

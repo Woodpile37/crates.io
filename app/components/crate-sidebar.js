@@ -14,6 +14,12 @@ export default class CrateSidebar extends Component {
     return homepage && (!repository || simplifyUrl(repository) !== simplifyUrl(homepage));
   }
 
+  get cargoAddCommand() {
+    return this.args.requestedVersion
+      ? `cargo add ${this.args.crate.name}@${this.args.requestedVersion}`
+      : `cargo add ${this.args.crate.name}`;
+  }
+
   get tomlSnippet() {
     return `${this.args.crate.name} = "${this.args.version.num}"`;
   }
@@ -25,7 +31,7 @@ export default class CrateSidebar extends Component {
     let playgroundCrate = playgroundCrates.find(it => it.name === this.args.crate.name);
     if (!playgroundCrate) return;
 
-    return `https://play.rust-lang.org/?edition=2018&code=use%20${playgroundCrate.id}%3B%0A%0Afn%20main()%20%7B%0A%20%20%20%20%2F%2F%20try%20using%20the%20%60${playgroundCrate.id}%60%20crate%20here%0A%7D`;
+    return `https://play.rust-lang.org/?edition=2021&code=use%20${playgroundCrate.id}%3B%0A%0Afn%20main()%20%7B%0A%20%20%20%20%2F%2F%20try%20using%20the%20%60${playgroundCrate.id}%60%20crate%20here%0A%7D`;
   }
 
   get canHover() {

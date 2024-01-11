@@ -1,43 +1,12 @@
-use crate::builders::{CrateBuilder, PublishBuilder};
+use crate::builders::PublishBuilder;
+use crate::routes::crates::versions::yank_unyank::YankRequestHelper;
 use crate::util::{RequestHelper, TestApp};
-use crate::OkBool;
-use http::StatusCode;
-
-impl crate::util::MockTokenUser {
-    /// Yank the specified version of the specified crate and run all pending background jobs
-    fn yank(&self, krate_name: &str, version: &str) -> crate::util::Response<OkBool> {
-        let url = format!("/api/v1/crates/{krate_name}/{version}/yank");
-        let response = self.delete(&url);
-        self.app().run_pending_background_jobs();
-        response
-    }
-
-    /// Unyank the specified version of the specified crate and run all pending background jobs
-    fn unyank(&self, krate_name: &str, version: &str) -> crate::util::Response<OkBool> {
-        let url = format!("/api/v1/crates/{krate_name}/{version}/unyank");
-        let response = self.put(&url, &[]);
-        self.app().run_pending_background_jobs();
-        response
-    }
-}
-
-impl crate::util::MockCookieUser {
-    /// Yank the specified version of the specified crate and run all pending background jobs
-    fn yank(&self, krate_name: &str, version: &str) -> crate::util::Response<OkBool> {
-        let url = format!("/api/v1/crates/{krate_name}/{version}/yank");
-        let response = self.delete(&url);
-        self.app().run_pending_background_jobs();
-        response
-    }
-
-    /// Unyank the specified version of the specified crate and run all pending background jobs
-    fn unyank(&self, krate_name: &str, version: &str) -> crate::util::Response<OkBool> {
-        let url = format!("/api/v1/crates/{krate_name}/{version}/unyank");
-        let response = self.put(&url, &[]);
-        self.app().run_pending_background_jobs();
-        response
-    }
-}
+use chrono::Utc;
+use crates_io::rate_limiter::LimitedAction;
+use crates_io::schema::publish_limit_buckets;
+use diesel::{ExpressionMethods, RunQueryDsl};
+use googletest::prelude::*;
+use std::time::Duration;
 
 #[test]
 #[allow(unknown_lints, clippy::bool_assert_comparison)] // for claim::assert_some_eq! with bool
@@ -45,11 +14,11 @@ fn yank_works_as_intended() {
     let (app, anon, cookie, token) = TestApp::full().with_token();
 
     // Upload a new crate, putting it in the git index
-    let crate_to_publish = PublishBuilder::new("fyk");
+    let crate_to_publish = PublishBuilder::new("fyk", "1.0.0");
     token.publish_crate(crate_to_publish).good();
 
     let crates = app.crates_from_index_head("fyk");
-    assert_eq!(crates.len(), 1);
+    assert_that!(crates, len(eq(1)));
     assert_some_eq!(crates[0].yanked, false);
 
     // make sure it's not yanked
@@ -60,7 +29,7 @@ fn yank_works_as_intended() {
     token.yank("fyk", "1.0.0").good();
 
     let crates = app.crates_from_index_head("fyk");
-    assert_eq!(crates.len(), 1);
+    assert_that!(crates, len(eq(1)));
     assert_some_eq!(crates[0].yanked, true);
 
     let json = anon.show_version("fyk", "1.0.0");
@@ -70,7 +39,7 @@ fn yank_works_as_intended() {
     token.unyank("fyk", "1.0.0").good();
 
     let crates = app.crates_from_index_head("fyk");
-    assert_eq!(crates.len(), 1);
+    assert_that!(crates, len(eq(1)));
     assert_some_eq!(crates[0].yanked, false);
 
     let json = anon.show_version("fyk", "1.0.0");
@@ -80,7 +49,7 @@ fn yank_works_as_intended() {
     cookie.yank("fyk", "1.0.0").good();
 
     let crates = app.crates_from_index_head("fyk");
-    assert_eq!(crates.len(), 1);
+    assert_that!(crates, len(eq(1)));
     assert_some_eq!(crates[0].yanked, true);
 
     let json = anon.show_version("fyk", "1.0.0");
@@ -90,31 +59,81 @@ fn yank_works_as_intended() {
     cookie.unyank("fyk", "1.0.0").good();
 
     let crates = app.crates_from_index_head("fyk");
-    assert_eq!(crates.len(), 1);
+    assert_that!(crates, len(eq(1)));
     assert_some_eq!(crates[0].yanked, false);
 
     let json = anon.show_version("fyk", "1.0.0");
     assert!(!json.version.yanked);
 }
 
-#[test]
-fn yank_by_a_non_owner_fails() {
-    let (app, _, _, token) = TestApp::full().with_token();
+#[track_caller]
+fn check_yanked(app: &TestApp, is_yanked: bool) {
+    let crates = app.crates_from_index_head("yankable");
+    assert_that!(crates, len(eq(1)));
+    assert_some_eq!(crates[0].yanked, is_yanked);
+}
 
-    let another_user = app.db_new_user("bar");
-    let another_user = another_user.as_model();
+#[test]
+fn yank_ratelimit_hit() {
+    let (app, _, _, token) = TestApp::full()
+        .with_rate_limit(LimitedAction::YankUnyank, Duration::from_millis(500), 1)
+        .with_token();
+
+    // Set up the database so it'll think we've massively rate-limited ourselves.
     app.db(|conn| {
-        CrateBuilder::new("foo_not", another_user.id)
-            .version("1.0.0")
-            .expect_build(conn);
+        // Ratelimit bucket should next refill in about a year
+        let far_future = Utc::now().naive_utc() + Duration::from_secs(60 * 60 * 24 * 365);
+        diesel::insert_into(publish_limit_buckets::table)
+            .values((
+                publish_limit_buckets::user_id.eq(token.as_model().user_id),
+                publish_limit_buckets::action.eq(LimitedAction::YankUnyank),
+                publish_limit_buckets::tokens.eq(0),
+                publish_limit_buckets::last_refill.eq(far_future),
+            ))
+            .execute(conn)
+            .expect("Failed to set fake ratelimit")
     });
 
-    let response = token.yank("foo_not", "1.0.0");
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(
-        response.into_json(),
-        json!({ "errors": [{ "detail": "must already be an owner to yank or unyank" }] })
-    );
+    // Upload a new crate
+    let crate_to_publish = PublishBuilder::new("yankable", "1.0.0");
+    token.publish_crate(crate_to_publish).good();
+    check_yanked(&app, false);
+
+    // Yank it and wait for the ratelimit to hit.
+    token
+        .yank("yankable", "1.0.0")
+        .assert_rate_limited(LimitedAction::YankUnyank);
+    check_yanked(&app, false);
+}
+
+#[test]
+fn yank_ratelimit_expires() {
+    let (app, _, _, token) = TestApp::full()
+        .with_rate_limit(LimitedAction::YankUnyank, Duration::from_millis(500), 1)
+        .with_token();
+
+    // Set up the database so it'll think we've massively ratelimited ourselves
+    app.db(|conn| {
+        // Ratelimit bucket should next refill right now!
+        let just_now = Utc::now().naive_utc() - Duration::from_millis(500);
+        diesel::insert_into(publish_limit_buckets::table)
+            .values((
+                publish_limit_buckets::user_id.eq(token.as_model().user_id),
+                publish_limit_buckets::action.eq(LimitedAction::YankUnyank),
+                publish_limit_buckets::tokens.eq(0),
+                publish_limit_buckets::last_refill.eq(just_now),
+            ))
+            .execute(conn)
+            .expect("Failed to set fake ratelimit")
+    });
+
+    // Upload a new crate
+    let crate_to_publish = PublishBuilder::new("yankable", "1.0.0");
+    token.publish_crate(crate_to_publish).good();
+    check_yanked(&app, false);
+
+    token.yank("yankable", "1.0.0").good();
+    check_yanked(&app, true);
 }
 
 #[test]
@@ -122,7 +141,7 @@ fn yank_max_version() {
     let (_, anon, _, token) = TestApp::full().with_token();
 
     // Upload a new crate
-    let crate_to_publish = PublishBuilder::new("fyk_max");
+    let crate_to_publish = PublishBuilder::new("fyk_max", "1.0.0");
     token.publish_crate(crate_to_publish).good();
 
     // double check the max version
@@ -130,7 +149,7 @@ fn yank_max_version() {
     assert_eq!(json.krate.max_version, "1.0.0");
 
     // add version 2.0.0
-    let crate_to_publish = PublishBuilder::new("fyk_max").version("2.0.0");
+    let crate_to_publish = PublishBuilder::new("fyk_max", "2.0.0");
     let json = token.publish_crate(crate_to_publish).good();
     assert_eq!(json.krate.max_version, "2.0.0");
 
@@ -176,7 +195,7 @@ fn publish_after_yank_max_version() {
     let (_, anon, _, token) = TestApp::full().with_token();
 
     // Upload a new crate
-    let crate_to_publish = PublishBuilder::new("fyk_max");
+    let crate_to_publish = PublishBuilder::new("fyk_max", "1.0.0");
     token.publish_crate(crate_to_publish).good();
 
     // double check the max version
@@ -190,7 +209,7 @@ fn publish_after_yank_max_version() {
     assert_eq!(json.krate.max_version, "0.0.0");
 
     // add version 2.0.0
-    let crate_to_publish = PublishBuilder::new("fyk_max").version("2.0.0");
+    let crate_to_publish = PublishBuilder::new("fyk_max", "2.0.0");
     let json = token.publish_crate(crate_to_publish).good();
     assert_eq!(json.krate.max_version, "2.0.0");
 
@@ -199,49 +218,4 @@ fn publish_after_yank_max_version() {
 
     let json = anon.show_crate("fyk_max");
     assert_eq!(json.krate.max_version, "2.0.0");
-}
-
-#[test]
-fn yank_records_an_audit_action() {
-    let (_, anon, _, token) = TestApp::full().with_token();
-
-    // Upload a new crate, putting it in the git index
-    let crate_to_publish = PublishBuilder::new("fyk");
-    token.publish_crate(crate_to_publish).good();
-
-    // Yank it
-    token.yank("fyk", "1.0.0").good();
-
-    // Make sure it has one publish and one yank audit action
-    let json = anon.show_version("fyk", "1.0.0");
-    let actions = json.version.audit_actions;
-
-    assert_eq!(actions.len(), 2);
-    let action = &actions[1];
-    assert_eq!(action.action, "yank");
-    assert_eq!(action.user.id, token.as_model().user_id);
-}
-
-#[test]
-fn unyank_records_an_audit_action() {
-    let (_, anon, _, token) = TestApp::full().with_token();
-
-    // Upload a new crate
-    let crate_to_publish = PublishBuilder::new("fyk");
-    token.publish_crate(crate_to_publish).good();
-
-    // Yank version 1.0.0
-    token.yank("fyk", "1.0.0").good();
-
-    // Unyank version 1.0.0
-    token.unyank("fyk", "1.0.0").good();
-
-    // Make sure it has one publish, one yank, and one unyank audit action
-    let json = anon.show_version("fyk", "1.0.0");
-    let actions = json.version.audit_actions;
-
-    assert_eq!(actions.len(), 3);
-    let action = &actions[2];
-    assert_eq!(action.action, "unyank");
-    assert_eq!(action.user.id, token.as_model().user_id);
 }

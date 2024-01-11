@@ -5,12 +5,14 @@ use diesel::prelude::*;
 
 use crate::util::errors::{cargo_err, AppResult};
 
+use crate::db::sql_types::semver::Triple;
 use crate::models::{Crate, Dependency, User};
 use crate::schema::*;
+use crate::sql::split_part;
 
 // Queryable has a custom implementation below
-#[derive(Clone, Identifiable, Associations, Debug, Queryable, Deserialize, Serialize)]
-#[belongs_to(Crate)]
+#[derive(Clone, Identifiable, Associations, Debug, Queryable)]
+#[diesel(belongs_to(Crate))]
 pub struct Version {
     pub id: i32,
     pub crate_id: i32,
@@ -25,10 +27,12 @@ pub struct Version {
     pub published_by: Option<i32>,
     pub checksum: String,
     pub links: Option<String>,
+    pub rust_version: Option<String>,
+    pub semver_no_prerelease: Option<Triple>,
 }
 
 #[derive(Insertable, Debug)]
-#[table_name = "versions"]
+#[diesel(table_name = versions, check_for_backend(diesel::pg::Pg))]
 pub struct NewVersion {
     crate_id: i32,
     num: String,
@@ -38,6 +42,7 @@ pub struct NewVersion {
     published_by: i32,
     checksum: String,
     links: Option<String>,
+    rust_version: Option<String>,
 }
 
 /// The highest version (semver order) and the most recently updated version.
@@ -94,7 +99,7 @@ impl TopVersions {
 
 impl Version {
     /// Returns (dependency, crate dependency name)
-    pub fn dependencies(&self, conn: &PgConnection) -> QueryResult<Vec<(Dependency, String)>> {
+    pub fn dependencies(&self, conn: &mut PgConnection) -> QueryResult<Vec<(Dependency, String)>> {
         Dependency::belonging_to(self)
             .inner_join(crates::table)
             .select((dependencies::all_columns, crates::name))
@@ -102,21 +107,20 @@ impl Version {
             .load(conn)
     }
 
-    pub fn record_readme_rendering(version_id_: i32, conn: &PgConnection) -> QueryResult<usize> {
-        use crate::schema::readme_renderings::dsl::*;
+    pub fn record_readme_rendering(version_id: i32, conn: &mut PgConnection) -> QueryResult<usize> {
         use diesel::dsl::now;
 
-        diesel::insert_into(readme_renderings)
-            .values(version_id.eq(version_id_))
-            .on_conflict(version_id)
+        diesel::insert_into(readme_renderings::table)
+            .values(readme_renderings::version_id.eq(version_id))
+            .on_conflict(readme_renderings::version_id)
             .do_update()
-            .set(rendered_at.eq(now))
+            .set(readme_renderings::rendered_at.eq(now))
             .execute(conn)
     }
 
     /// Gets the User who ran `cargo publish` for this version, if recorded.
     /// Not for use when you have a group of versions you need the publishers for.
-    pub fn published_by(&self, conn: &PgConnection) -> Option<User> {
+    pub fn published_by(&self, conn: &mut PgConnection) -> Option<User> {
         match self.published_by {
             Some(pb) => users::table.find(pb).first(conn).ok(),
             None => None,
@@ -131,15 +135,15 @@ impl NewVersion {
         num: &semver::Version,
         features: &BTreeMap<String, Vec<String>>,
         license: Option<String>,
-        license_file: Option<&str>,
         crate_size: i32,
         published_by: i32,
         checksum: String,
         links: Option<String>,
+        rust_version: Option<String>,
     ) -> AppResult<Self> {
         let features = serde_json::to_value(features)?;
 
-        let mut new_version = NewVersion {
+        Ok(NewVersion {
             crate_id,
             num: num.to_string(),
             features,
@@ -148,31 +152,29 @@ impl NewVersion {
             published_by,
             checksum,
             links,
-        };
-
-        new_version.validate_license(license_file)?;
-
-        Ok(new_version)
+            rust_version,
+        })
     }
 
-    pub fn save(&self, conn: &PgConnection, published_by_email: &str) -> AppResult<Version> {
-        use crate::schema::versions::dsl::*;
+    pub fn save(&self, conn: &mut PgConnection, published_by_email: &str) -> AppResult<Version> {
         use diesel::dsl::exists;
         use diesel::{insert_into, select};
 
-        conn.transaction(|| {
-            let already_uploaded = versions
-                .filter(crate_id.eq(self.crate_id))
-                .filter(num.eq(&self.num));
+        conn.transaction(|conn| {
+            let num_no_build = strip_build_metadata(&self.num);
+
+            let already_uploaded = versions::table
+                .filter(versions::crate_id.eq(self.crate_id))
+                .filter(split_part(versions::num, "+", 1).eq(num_no_build));
+
             if select(exists(already_uploaded)).get_result(conn)? {
-                return Err(cargo_err(&format_args!(
-                    "crate version `{}` is already \
-                     uploaded",
-                    self.num
+                return Err(cargo_err(format_args!(
+                    "crate version `{}` is already uploaded",
+                    num_no_build
                 )));
             }
 
-            let version: Version = insert_into(versions).values(self).get_result(conn)?;
+            let version: Version = insert_into(versions::table).values(self).get_result(conn)?;
 
             insert_into(versions_published_by::table)
                 .values((
@@ -183,38 +185,18 @@ impl NewVersion {
             Ok(version)
         })
     }
-
-    fn validate_license(&mut self, license_file: Option<&str>) -> AppResult<()> {
-        if let Some(ref license) = self.license {
-            validate_license_expr(license)?;
-        } else if license_file.is_some() {
-            // If no license is given, but a license file is given, flag this
-            // crate as having a nonstandard license. Note that we don't
-            // actually do anything else with license_file currently.
-            self.license = Some(String::from("non-standard"));
-        }
-        Ok(())
-    }
 }
 
-fn validate_license_expr(s: &str) -> AppResult<()> {
-    pub const PARSE_MODE: spdx::ParseMode = spdx::ParseMode {
-        allow_lower_case_operators: false,
-        allow_slash_as_or_operator: true,
-        allow_imprecise_license_names: false,
-        allow_postfix_plus_on_gpl: true,
-    };
-
-    spdx::Expression::parse_mode(s, PARSE_MODE).map_err(|_| {
-        cargo_err("unknown or invalid license expression; see http://opensource.org/licenses for options, and http://spdx.org/licenses/ for their identifiers")
-    })?;
-
-    Ok(())
+fn strip_build_metadata(version: &str) -> &str {
+    version
+        .split_once('+')
+        .map(|parts| parts.0)
+        .unwrap_or(version)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_license_expr, TopVersions};
+    use super::TopVersions;
     use chrono::NaiveDateTime;
 
     #[track_caller]
@@ -283,19 +265,5 @@ mod tests {
                 newest: Some(version("1.0.4")),
             }
         );
-    }
-
-    #[test]
-    fn licenses() {
-        assert_ok!(validate_license_expr("MIT"));
-        assert_ok!(validate_license_expr("MIT OR Apache-2.0"));
-        assert_ok!(validate_license_expr("MIT/Apache-2.0"));
-        assert_ok!(validate_license_expr("MIT AND Apache-2.0"));
-        assert_ok!(validate_license_expr("MIT OR (Apache-2.0 AND MIT)"));
-        assert_ok!(validate_license_expr("GPL-3.0+"));
-
-        let error = assert_err!(validate_license_expr("apache 2.0"));
-        let error = format!("{error}");
-        assert!(error.starts_with("unknown or invalid license expression; see http"));
     }
 }

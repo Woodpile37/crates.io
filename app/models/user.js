@@ -1,7 +1,8 @@
 import Model, { attr } from '@ember-data/model';
 import { inject as service } from '@ember/service';
+import { waitForPromise } from '@ember/test-waiters';
 
-import { customAction } from '../utils/custom-action';
+import { apiAction } from '@mainmatter/ember-api-actions';
 
 export default class User extends Model {
   @service store;
@@ -10,6 +11,7 @@ export default class User extends Model {
   @attr email_verified;
   @attr email_verification_sent;
   @attr name;
+  @attr is_admin;
   @attr login;
   @attr avatar;
   @attr url;
@@ -17,11 +19,11 @@ export default class User extends Model {
   @attr admin;
 
   async stats() {
-    return await customAction(this, { method: 'GET', path: 'stats' });
+    return await waitForPromise(apiAction(this, { method: 'GET', path: 'stats' }));
   }
 
   async changeEmail(email) {
-    await customAction(this, { method: 'PUT', data: { user: { email } } });
+    await waitForPromise(apiAction(this, { method: 'PUT', data: { user: { email } } }));
 
     this.store.pushPayload({
       user: {
@@ -34,6 +36,6 @@ export default class User extends Model {
   }
 
   async resendVerificationEmail() {
-    return await customAction(this, { method: 'PUT', path: 'resend' });
+    return await waitForPromise(apiAction(this, { method: 'PUT', path: 'resend' }));
   }
 }

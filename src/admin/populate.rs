@@ -13,12 +13,13 @@ pub struct Opts {
     version_ids: Vec<i32>,
 }
 
-pub fn run(opts: Opts) {
-    let conn = db::oneoff_connection().unwrap();
-    conn.transaction(|| update(opts, &conn)).unwrap();
+pub fn run(opts: Opts) -> anyhow::Result<()> {
+    let mut conn = db::oneoff_connection()?;
+    conn.transaction(|conn| update(opts, conn))?;
+    Ok(())
 }
 
-fn update(opts: Opts, conn: &PgConnection) -> QueryResult<()> {
+fn update(opts: Opts, conn: &mut PgConnection) -> QueryResult<()> {
     use diesel::dsl::*;
 
     for id in opts.version_ids {

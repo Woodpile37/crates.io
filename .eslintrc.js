@@ -13,6 +13,7 @@ module.exports = {
   extends: [
     'eslint:recommended',
     'plugin:ember/recommended',
+    'plugin:qunit/recommended',
     'plugin:qunit-dom/recommended',
     'plugin:unicorn/recommended',
     'plugin:prettier/recommended',
@@ -37,6 +38,9 @@ module.exports = {
     'ember-concurrency/no-perform-without-catch': 'warn',
     'ember-concurrency/require-task-name-suffix': 'error',
 
+    // disabled because of false positives in `assert.rejects()` calls
+    'qunit/require-expect': 'off',
+
     'unicorn/explicit-length-check': ['error', { 'non-zero': 'not-equal' }],
     // disabled because of false positives related to `EmberArray`
     'unicorn/no-array-for-each': 'off',
@@ -54,6 +58,10 @@ module.exports = {
     'unicorn/prefer-number-properties': 'off',
     // disabled because it seems unnecessary
     'unicorn/prefer-reflect-apply': 'off',
+    // disabled because of false positives related to `EmberArray`
+    'unicorn/prefer-spread': 'off',
+    // disabled because of Sentry issues
+    'unicorn/prefer-string-replace-all': 'off',
     // disabled because switch statements in JS are quite error-prone
     'unicorn/prefer-switch': 'off',
     // disabled because of false positives
@@ -106,7 +114,6 @@ module.exports = {
         '.eslintrc.js',
         '.template-lintrc.js',
         'ember-cli-build.js',
-        'fastboot.js',
         'testem.js',
         'blueprints/*/index.js',
         'config/**/*.js',

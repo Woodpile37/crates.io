@@ -1,15 +1,12 @@
 use crate::controllers::frontend_prelude::*;
-use crate::util::errors::{forbidden, not_found, MetricsDisabled};
-use conduit::{Body, Response};
-use prometheus::{Encoder, TextEncoder};
+use crate::util::errors::{custom, forbidden, not_found};
+use prometheus::TextEncoder;
 
 /// Handles the `GET /api/private/metrics/:kind` endpoint.
-pub fn prometheus(req: &mut dyn RequestExt) -> EndpointResult {
-    let app = req.app();
-
+pub async fn prometheus(app: AppState, Path(kind): Path<String>, req: Parts) -> AppResult<String> {
     if let Some(expected_token) = &app.config.metrics_authorization_token {
         let provided_token = req
-            .headers()
+            .headers
             .get(header::AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.strip_prefix("Bearer "));
@@ -20,20 +17,16 @@ pub fn prometheus(req: &mut dyn RequestExt) -> EndpointResult {
     } else {
         // To avoid accidentally leaking metrics if the environment variable is not set, prevent
         // access to any metrics endpoint if the authorization token is not configured.
-        return Err(Box::new(MetricsDisabled));
+        let detail = "Metrics are disabled on this crates.io instance";
+        return Err(custom(StatusCode::NOT_FOUND, detail));
     }
 
-    let metrics = match req.params()["kind"].as_str() {
-        "service" => app.service_metrics.gather(&*req.db_read()?)?,
-        "instance" => app.instance_metrics.gather(app)?,
-        _ => return Err(not_found()),
-    };
+    let metrics = spawn_blocking(move || match kind.as_str() {
+        "service" => Ok(app.service_metrics.gather(&mut *app.db_read()?)?),
+        "instance" => Ok(app.instance_metrics.gather(&app)?),
+        _ => Err(not_found()),
+    })
+    .await?;
 
-    let mut output = Vec::new();
-    TextEncoder::new().encode(&metrics, &mut output)?;
-
-    Ok(Response::builder()
-        .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
-        .header(header::CONTENT_LENGTH, output.len())
-        .body(Body::from_vec(output))?)
+    Ok(TextEncoder::new().encode_to_string(&metrics)?)
 }

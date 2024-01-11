@@ -2,7 +2,7 @@
 
 module.exports = function (environment) {
   let ENV = {
-    modulePrefix: 'cargo',
+    modulePrefix: 'crates-io',
     environment,
     rootURL: '/',
     locationType: 'history',
@@ -23,13 +23,16 @@ module.exports = function (environment) {
       // when it is created
     },
 
-    fastboot: {
-      hostWhitelist: ['crates.io', /^localhost:\d+$/, /\.herokuapp\.com$/],
-    },
-
     'ember-cli-notifications': {
       autoClear: true,
       clearDuration: 10_000,
+    },
+
+    // Note that this configuration will be removed entirely below if we're in a
+    // production environment.
+    'ember-cli-mirage': {
+      // We don't want to use Mirage if a proxy backend has been provided.
+      enabled: !process.env.PROXY_BACKEND,
     },
   };
 

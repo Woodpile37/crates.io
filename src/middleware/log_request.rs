@@ -1,141 +1,176 @@
 //! Log all requests in a format similar to Heroku's router, but with additional
 //! information that we care about like User-Agent
 
-use super::prelude::*;
-use crate::util::request_header;
-
-use conduit::{header, RequestExt, StatusCode};
-
+use crate::ci::CiService;
+use crate::controllers::util::RequestPartsExt;
+use crate::headers::XRequestId;
 use crate::middleware::normalize_path::OriginalPath;
-use crate::middleware::response_timing::ResponseTime;
-use std::cell::RefCell;
+use crate::middleware::real_ip::RealIp;
+use axum::extract::Request;
+use axum::middleware::Next;
+use axum::response::IntoResponse;
+use axum::Extension;
+use axum_extra::headers::UserAgent;
+use axum_extra::TypedHeader;
+use http::{Method, StatusCode, Uri};
+use parking_lot::Mutex;
 use std::fmt::{self, Display, Formatter};
+use std::ops::Deref;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-const SLOW_REQUEST_THRESHOLD_MS: u64 = 1000;
+const SLOW_REQUEST_THRESHOLD_MS: u128 = 1000;
 
-// A thread local is used instead of a request extension to avoid the need to pass the request
-// object everywhere in the codebase. When migrating to async this will need to be moved to an
-// async-equivalent, as thread locals misbehave in async contexes.
-thread_local! {
-    static CUSTOM_METADATA: RefCell<Vec<(&'static str, String)>> = RefCell::new(Vec::new());
+#[derive(Clone, Debug)]
+pub struct ErrorField(pub String);
+
+#[derive(Clone, Debug)]
+pub struct CauseField(pub String);
+
+#[derive(axum::extract::FromRequestParts)]
+pub struct RequestMetadata {
+    method: Method,
+    uri: Uri,
+    original_path: Option<Extension<OriginalPath>>,
+    real_ip: Extension<RealIp>,
+    user_agent: Option<TypedHeader<UserAgent>>,
+    request_id: Option<TypedHeader<XRequestId>>,
+    ci_service: Option<CiService>,
 }
 
-#[derive(Default)]
-pub(super) struct LogRequests();
-
-impl Middleware for LogRequests {
-    fn before(&self, _: &mut dyn RequestExt) -> BeforeResult {
-        // Remove any metadata set by the previous task before processing any new request.
-        CUSTOM_METADATA.with(|metadata| metadata.borrow_mut().clear());
-
-        Ok(())
-    }
-
-    fn after(&self, req: &mut dyn RequestExt, res: AfterResult) -> AfterResult {
-        println!("{}", RequestLine { req, res: &res });
-
-        res
-    }
+pub struct Metadata<'a> {
+    request: RequestMetadata,
+    status: StatusCode,
+    cause: Option<&'a CauseField>,
+    error: Option<&'a ErrorField>,
+    duration: Duration,
+    custom_metadata: RequestLog,
 }
 
-pub fn add_custom_metadata<V: Display>(key: &'static str, value: V) {
-    CUSTOM_METADATA.with(|metadata| metadata.borrow_mut().push((key, value.to_string())));
-    sentry::configure_scope(|scope| scope.set_extra(key, value.to_string().into()));
-}
-
-#[cfg(test)]
-pub(crate) fn get_log_message(key: &'static str) -> String {
-    CUSTOM_METADATA.with(|metadata| {
-        for (k, v) in &*metadata.borrow() {
-            if key == *k {
-                return v.clone();
-            }
-        }
-        panic!("expected log message for {} not found", key);
-    })
-}
-
-struct RequestLine<'r> {
-    req: &'r dyn RequestExt,
-    res: &'r AfterResult,
-}
-
-impl Display for RequestLine<'_> {
+impl Display for Metadata<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         let mut line = LogLine::new(f);
 
-        let status = self.res.as_ref().map(|res| res.status());
-        let status = status.unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        // The download endpoint is our most requested endpoint by 1-2 orders of
+        // magnitude. Since we pay per logged GB we try to reduce the amount of
+        // bytes per log line for this endpoint.
 
-        let at = if status.is_server_error() {
-            "error"
+        let is_download_endpoint = self.request.uri.path().ends_with("/download");
+        let is_download_redirect = is_download_endpoint && self.status.is_redirection();
+
+        let method = &self.request.method;
+        if !is_download_redirect || method != Method::GET {
+            line.add_field("method", method)?;
+        }
+
+        if let Some(original_path) = &self.request.original_path {
+            line.add_quoted_field("path", &original_path.deref().0)?;
         } else {
-            "info"
-        };
-
-        line.add_field("at", at)?;
-        line.add_field("method", self.req.method())?;
-        line.add_quoted_field("path", FullPath(self.req))?;
-
-        // The request_id is not logged for successful download requests
-        if !(self.req.path().ends_with("/download")
-            && self
-                .res
-                .as_ref()
-                .ok()
-                .map(|ok| ok.status().is_redirection())
-                == Some(true))
-        {
-            line.add_field("request_id", request_header(self.req, "x-request-id"))?;
+            line.add_quoted_field("path", &self.request.uri)?;
         }
 
-        line.add_quoted_field("fwd", request_header(self.req, "x-real-ip"))?;
-
-        let response_time = self.req.extensions().get::<ResponseTime>();
-        if let Some(response_time) = response_time {
-            line.add_field("service", response_time)?;
-        }
-        line.add_field("status", status.as_str())?;
-        line.add_quoted_field("user_agent", request_header(self.req, header::USER_AGENT))?;
-
-        CUSTOM_METADATA.with(|metadata| {
-            for (key, value) in &*metadata.borrow() {
-                line.add_quoted_field(key, value)?;
-            }
-            fmt::Result::Ok(())
-        })?;
-
-        if let Err(err) = self.res {
-            line.add_quoted_field("error", err)?;
+        if !is_download_redirect {
+            match &self.request.request_id {
+                Some(header) => line.add_field("request_id", header.as_str())?,
+                None => line.add_field("request_id", "")?,
+            };
         }
 
-        if let Some(response_time) = response_time {
-            if response_time.as_millis() > SLOW_REQUEST_THRESHOLD_MS {
-                line.add_marker("SLOW REQUEST")?;
-            }
+        line.add_quoted_field("ip", **self.request.real_ip)?;
+
+        let response_time_in_ms = self.duration.as_millis();
+        if !is_download_redirect || response_time_in_ms > 0 {
+            line.add_field("service", format!("{response_time_in_ms}ms"))?;
+        }
+
+        if !is_download_redirect {
+            line.add_field("status", self.status.as_str())?;
+        }
+
+        let user_agent = self.request.user_agent.as_ref();
+        let user_agent = user_agent.map(|ua| ua.as_str()).unwrap_or_default();
+        line.add_quoted_field("user_agent", user_agent)?;
+
+        if self.request.original_path.is_some() {
+            line.add_quoted_field("normalized_path", &self.request.uri)?;
+        }
+
+        if let Some(ci_service) = self.request.ci_service {
+            line.add_quoted_field("ci", ci_service)?;
+        }
+
+        let metadata = self.custom_metadata.lock();
+        for (key, value) in &*metadata {
+            line.add_quoted_field(key, value)?;
+        }
+
+        if let Some(CauseField(ref cause)) = self.cause {
+            line.add_quoted_field("cause", cause)?;
+        }
+
+        if let Some(ErrorField(ref error)) = self.error {
+            line.add_quoted_field("error", error)?;
+        }
+
+        if response_time_in_ms > SLOW_REQUEST_THRESHOLD_MS {
+            line.add_marker("SLOW REQUEST")?;
         }
 
         Ok(())
     }
 }
 
-struct FullPath<'a>(&'a dyn RequestExt);
+pub async fn log_requests(
+    request_metadata: RequestMetadata,
+    mut req: Request,
+    next: Next,
+) -> impl IntoResponse {
+    let start_instant = Instant::now();
 
-impl<'a> Display for FullPath<'a> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        let request = self.0;
+    let custom_metadata = RequestLog::default();
+    req.extensions_mut().insert(custom_metadata.clone());
 
-        let original_path = request.extensions().get::<OriginalPath>();
-        let path = original_path
-            .map(|p| p.0.as_str())
-            .unwrap_or_else(|| request.path());
+    let response = next.run(req).await;
 
-        write!(f, "{}", path)?;
+    let metadata = Metadata {
+        request: request_metadata,
+        status: response.status(),
+        cause: response.extensions().get(),
+        error: response.extensions().get(),
+        duration: start_instant.elapsed(),
+        custom_metadata,
+    };
 
-        if let Some(q_string) = request.query_string() {
-            write!(f, "?{}", q_string)?;
-        }
-        Ok(())
+    if metadata.status.is_server_error() {
+        error!(target: "http", "{metadata}");
+    } else {
+        info!(target: "http", "{metadata}");
+    };
+
+    response
+}
+
+#[derive(Clone, Debug, Deref, Default)]
+pub struct RequestLog(Arc<Mutex<Vec<(&'static str, String)>>>);
+
+impl RequestLog {
+    pub fn add<V: Display>(&self, key: &'static str, value: V) {
+        let mut metadata = self.lock();
+        metadata.push((key, value.to_string()));
+
+        sentry::configure_scope(|scope| scope.set_extra(key, value.to_string().into()));
+    }
+}
+
+pub trait RequestLogExt {
+    fn request_log(&self) -> &RequestLog;
+}
+
+impl<T: RequestPartsExt> RequestLogExt for T {
+    fn request_log(&self) -> &RequestLog {
+        self.extensions()
+            .get::<RequestLog>()
+            .expect("Failed to find `RequestLog` request extension")
     }
 }
 
