@@ -46,7 +46,7 @@
     "fastboot-app-server": "3.3.2",
     "highlight.js": "11.6.0",
     "macro-decorators": "0.1.2",
-    "morgan": "1.10.0",
+    "morgan": "1.12.1",
     "pretty-bytes": "6.0.0",
     "semver": "7.3.7",
     "tracked-toolbox": "2.0.0"
